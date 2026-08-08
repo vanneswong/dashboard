@@ -1,11 +1,12 @@
 #!/bin/bash
 # ============================================================================
-# 服务仪表盘更新脚本 v3.3
+# 服务仪表盘更新脚本 v3.4
 # 通用版本 - 适用于各类Linux服务器
 # ============================================================================
 # 功能：自动发现服务、健康检查、生成Web仪表盘
 # 作者：MiMo
-# 版本：v3.3
+# 版本：v3.4
+# 更新：支持自动发现服务，无需手动配置
 # ============================================================================
 
 set -euo pipefail
@@ -34,16 +35,19 @@ TEMP_FILE="/tmp/dashboard_update.html"
 LOG_FILE="${DASHBOARD_LOG:-/var/log/dashboard_update.log}"
 TIMEOUT_SECONDS="${DASHBOARD_TIMEOUT:-3}"
 
+# 颜色配置
+COLOR_HEALTHY="${COLOR_HEALTHY:-linear-gradient(90deg, #27ae60, #2ecc71)|#27ae60}"
+COLOR_STOPPED="${COLOR_STOPPED:-linear-gradient(90deg, #34495e, #2c3e50)|#34495e}"
+COLOR_UNHEALTHY="${COLOR_UNHEALTHY:-linear-gradient(90deg, #e67e22, #d35400)|#e67e22}"
+
 # 获取服务器IP地址（自动检测）
 get_ip_address() {
     local ip=""
-    # 尝试从默认网关接口获取
     local default_iface
     default_iface=$(ip route | grep default | awk '{print $5}' | head -1)
     if [ -n "$default_iface" ]; then
         ip=$(ip -4 addr show "$default_iface" 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
     fi
-    # 备用方案
     if [ -z "$ip" ]; then
         ip=$(hostname -I | awk '{print $1}')
     fi
@@ -60,7 +64,71 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 NC='\033[0m'
+
+# 已知服务名称映射
+declare -A SERVICE_NAMES=(
+    [80]="Web服务"
+    [443]="HTTPS服务"
+    [22]="SSH服务"
+    [3000]="Grafana/Prometheus"
+    [3306]="MySQL数据库"
+    [5432]="PostgreSQL数据库"
+    [6379]="Redis缓存"
+    [8080]="Web服务(8080)"
+    [8081]="Web服务(8081)"
+    [8082]="Web服务(8082)"
+    [8083]="Web服务(8083)"
+    [8084]="Web服务(8084)"
+    [8085]="Web服务(8085)"
+    [8086]="InfluxDB"
+    [8088]="Web服务(8088)"
+    [8090]="Web服务(8090)"
+    [8091]="Web服务(8091)"
+    [8443]="HTTPS服务(8443)"
+    [8888]="Jupyter Notebook"
+    [9000]="Portainer/PHP-FPM"
+    [9090]="Prometheus"
+    [9091]="Transmission"
+    [9092]="Kafka"
+    [9200]="Elasticsearch"
+    [9300]="Elasticsearch"
+    [11211]="Memcached"
+    [27017]="MongoDB"
+    [5000]="Docker Registry"
+    [5672]="RabbitMQ"
+    [15672]="RabbitMQ管理"
+    [6801]="Aria2/RPC"
+    [6802]="PHP探针"
+    [6803]="Adminer"
+    [7681]="Web终端"
+    [8989]="Sonarr"
+    [7878]="Radarr"
+    [6789]="Netdata"
+)
+
+# 常见服务描述
+declare -A SERVICE_DESCS=(
+    [80]="HTTP Web服务器，提供网页访问服务"
+    [443]="HTTPS安全Web服务器"
+    [22]="SSH远程登录服务，提供安全的远程管理"
+    [3000]="监控可视化平台或API服务"
+    [3306]="MySQL关系型数据库服务"
+    [5432]="PostgreSQL关系型数据库服务"
+    [6379]="Redis内存缓存数据库"
+    [8080]="Web应用服务或管理后台"
+    [8081]="Web应用服务或API服务"
+    [9000]="容器管理平台或PHP-FPM服务"
+    [9090]="Prometheus监控系统"
+    [9091]="Transmission BT下载客户端"
+    [9200]="Elasticsearch搜索引擎"
+    [6801]="Aria2 RPC下载服务"
+    [6802]="PHP服务器环境探测工具"
+    [6803]="数据库管理工具"
+    [7681]="基于Web的SSH终端客户端"
+    [6789]="Netdata实时系统监控"
+)
 
 # ============================================================================
 # 函数定义
@@ -100,10 +168,6 @@ check_http() {
     code=$(echo "$response" | tail -1)
     body=$(echo "$response" | sed '$d')
     
-    # 健康判断逻辑：
-    # - 2xx/3xx: 健康
-    # - 401/403: 正常（需要认证）
-    # - 有响应内容的4xx/5xx: 服务运行中
     if [[ "$code" =~ ^[23] ]]; then
         return 0
     elif [[ "$code" == "401" ]] || [[ "$code" == "403" ]]; then
@@ -114,7 +178,100 @@ check_http() {
     return 1
 }
 
-# 扫描Nginx配置发现服务
+# 获取服务名称
+get_service_name() {
+    local port="$1"
+    local name=""
+    
+    # 首先尝试从Nginx配置获取
+    if [ -d /etc/nginx/sites-available ]; then
+        for f in /etc/nginx/sites-available/*; do
+            [ -f "$f" ] || continue
+            if grep -q "listen.*${port}" "$f" 2>/dev/null; then
+                name=$(basename "$f" | sed 's/-/ /g' | sed 's/\b\(.\)/\u\1/g')
+                [ "$name" != "default" ] && echo "$name" && return
+            fi
+        done
+    fi
+    
+    # 从已知服务映射获取
+    name="${SERVICE_NAMES[$port]:-}"
+    if [ -n "$name" ]; then
+        echo "$name"
+        return
+    fi
+    
+    # 尝试从进程名获取
+    local process_name
+    process_name=$(ss -tlnp 2>/dev/null | grep ":${port}" | grep -oP 'users:\(\("([^"]+)' | head -1 | sed 's/users:(("//')
+    if [ -n "$process_name" ]; then
+        echo "$process_name 服务"
+        return
+    fi
+    
+    # 默认名称
+    echo "服务($port)"
+}
+
+# 获取服务描述
+get_service_desc() {
+    local port="$1"
+    local name="$2"
+    
+    # 从已知描述获取
+    local desc="${SERVICE_DESCS[$port]:-}"
+    if [ -n "$desc" ]; then
+        echo "$desc"
+        return
+    fi
+    
+    # 默认描述
+    echo "运行在端口 $port 的服务 - $name"
+}
+
+# 自动发现服务
+auto_discover_services() {
+    local -A discovered_ports
+    
+    # 获取所有监听的TCP端口
+    local ports
+    ports=$(ss -tlnp 2>/dev/null | grep LISTEN | awk '{print $4}' | grep -oP '\d+$' | sort -n | uniq)
+    
+    if [ -z "$ports" ]; then
+        # 备用方案
+        ports=$(netstat -tlnp 2>/dev/null | grep LISTEN | awk '{print $4}' | grep -oP '\d+$' | sort -n | uniq)
+    fi
+    
+    # 过滤掉一些系统端口和不常用端口
+    local skip_ports="25 53 111 135 139 445 631 1433 1434 3389 5900 5938 6000 6001 6002 6003 6004 6005"
+    
+    for port in $ports; do
+        # 跳过小于1024的端口（除了常见的）
+        if [ "$port" -lt 1024 ] && ! echo "80 443 22 21 25 53 3306 5432 6379 8080 8081 9000 9090 9091" | grep -qw "$port"; then
+            continue
+        fi
+        
+        # 跳过指定的端口
+        if echo "$skip_ports" | grep -qw "$port"; then
+            continue
+        fi
+        
+        # 避免重复
+        if [ -n "${discovered_ports[$port]:-}" ]; then
+            continue
+        fi
+        discovered_ports["$port"]=1
+        
+        local name desc
+        name=$(get_service_name "$port")
+        desc=$(get_service_desc "$port" "$name")
+        
+        # 使用换行符分隔，而不是空格
+        echo "$port|$name|local|$desc|auto|auto"
+    done
+}
+
+# 扫描Nginx配置
 scan_nginx() {
     local dir="/etc/nginx/sites-available"
     [ -d "$dir" ] || return 0
@@ -131,7 +288,7 @@ scan_nginx() {
         name=$(basename "$f" | sed 's/-/ /g' | sed 's/\b\(.\)/\u\1/g')
         [ "$name" = "default" ] && continue
         
-        echo "$port|$name|local|Nginx服务|linear-gradient(135deg, #667eea 0%, #764ba2 100%)|#667eea"
+        echo "$port|$name|local|Nginx服务|auto|auto"
     done
 }
 
@@ -139,7 +296,19 @@ scan_nginx() {
 generate_card() {
     local port="$1" name="$2" access="$3" desc="$4" color="$5" btn_color="$6" status="$7"
     
-    [ -z "$color" ] || [ "$color" = "auto" ] && color="linear-gradient(135deg, #667eea 0%, #764ba2 100%)"
+    # 处理自动颜色
+    if [ "$color" = "auto" ] || [ -z "$color" ]; then
+        if [ "$status" = "healthy" ]; then
+            color=$(echo "$COLOR_HEALTHY" | cut -d'|' -f1)
+            btn_color=$(echo "$COLOR_HEALTHY" | cut -d'|' -f2)
+        elif [ "$status" = "stopped" ]; then
+            color=$(echo "$COLOR_STOPPED" | cut -d'|' -f1)
+            btn_color=$(echo "$COLOR_STOPPED" | cut -d'|' -f2)
+        else
+            color=$(echo "$COLOR_UNHEALTHY" | cut -d'|' -f1)
+            btn_color=$(echo "$COLOR_UNHEALTHY" | cut -d'|' -f2)
+        fi
+    fi
     [ -z "$btn_color" ] && btn_color="#667eea"
     
     local access_text access_class
@@ -171,12 +340,7 @@ generate_card() {
             ;;
     esac
     
-    local service_url
-    if [ "$access" = "global" ]; then
-        service_url="http://${IP_ADDRESS}:${port}"
-    else
-        service_url="http://${IP_ADDRESS}:${port}"
-    fi
+    local service_url="http://${IP_ADDRESS}:${port}"
     
     cat << CARD
         <div class="card">
@@ -484,7 +648,7 @@ HTMLEOF
 main() {
     local start_time
     start_time=$(date +%s)
-    local VERSION="v3.3"
+    local VERSION="v3.4"
     
     echo -e "${BLUE}╔══════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║        服务仪表盘更新脚本 $VERSION         ║${NC}"
@@ -502,35 +666,63 @@ main() {
     log_info "配置文件: $CONFIG_FILE"
     log_info "输出目录: $DASHBOARD_DIR"
     
-    # 检查配置文件
-    if [ ! -f "$CONFIG_FILE" ]; then
-        log_error "配置文件不存在: $CONFIG_FILE"
-        echo -e "${RED}错误: 配置文件不存在，请先创建配置文件${NC}"
-        echo -e "配置文件路径: $CONFIG_FILE"
-        echo -e "参考模板: $SCRIPT_DIR/conf/services.conf.example"
-        exit 1
-    fi
-    
     # 获取服务列表
     log_info "获取服务列表..."
     local -A seen_ports
     local services=()
+    local use_auto_discover=false
     
-    while IFS= read -r line; do
-        [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
-        if [[ "$line" =~ ^[0-9]+\| ]]; then
-            local port
-            port=$(echo "$line" | cut -d'|' -f1)
+    # 从配置文件加载服务
+    if [ -f "$CONFIG_FILE" ] && [ -s "$CONFIG_FILE" ]; then
+        # 检查配置文件是否有有效内容（非注释行）
+        local valid_lines
+        valid_lines=$(grep -cE "^[0-9]+\|" "$CONFIG_FILE" 2>/dev/null || echo "0")
+        
+        if [ "$valid_lines" -gt 0 ]; then
+            while IFS= read -r line; do
+                [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+                if [[ "$line" =~ ^[0-9]+\| ]]; then
+                    local port
+                    port=$(echo "$line" | cut -d'|' -f1)
+                    if [ -z "${seen_ports[$port]:-}" ]; then
+                        seen_ports["$port"]=1
+                        services+=("$line")
+                    fi
+                fi
+            done < "$CONFIG_FILE"
+            log_info "从配置文件加载了 ${#services[@]} 个服务"
+        else
+            use_auto_discover=true
+            log_info "配置文件为空，使用自动发现模式"
+        fi
+    else
+        use_auto_discover=true
+        log_info "配置文件不存在，使用自动发现模式"
+    fi
+    
+    # 自动发现服务
+    if [ "$use_auto_discover" = true ]; then
+        echo -e "${CYAN}正在自动发现本机服务...${NC}"
+        log_info "自动扫描本机运行的服务..."
+        
+        # 使用while read循环正确处理换行符分隔的输出
+        while IFS= read -r service; do
+            [ -z "$service" ] && continue
+            local port name
+            port=$(echo "$service" | cut -d'|' -f1)
+            name=$(echo "$service" | cut -d'|' -f2)
             if [ -z "${seen_ports[$port]:-}" ]; then
                 seen_ports["$port"]=1
-                services+=("$line")
+                services+=("$service")
+                log_info "  发现服务: $name (端口 $port)"
             fi
-        fi
-    done < "$CONFIG_FILE"
-    log_info "从配置文件加载了 ${#services[@]} 个服务"
+        done < <(auto_discover_services)
+        
+        log_info "自动发现了 ${#services[@]} 个服务"
+    fi
     
     # 扫描Nginx配置（可选）
-    if [ "${SCAN_NGINX:-true}" = "true" ]; then
+    if [ "${SCAN_NGINX:-true}" = "true" ] && [ "$use_auto_discover" = false ]; then
         log_info "扫描Nginx配置..."
         while IFS= read -r line; do
             [ -z "$line" ] && continue
@@ -542,6 +734,14 @@ main() {
                 log_info "从Nginx发现: $(echo "$line" | cut -d'|' -f2) (端口 $port)"
             fi
         done <<< "$(scan_nginx)"
+    fi
+    
+    # 如果没有发现任何服务
+    if [ ${#services[@]} -eq 0 ]; then
+        log_warn "未发现任何服务"
+        echo -e "${YELLOW}警告: 未发现任何运行中的服务${NC}"
+        echo -e "请检查是否有服务正在运行，或手动编辑配置文件${NC}"
+        services+=("80|无服务|local|未发现运行中的服务|auto|auto")
     fi
     
     log_info "共找到 ${#services[@]} 个服务"
@@ -623,6 +823,12 @@ main() {
     echo ""
     echo -e "  访问地址: ${BLUE}http://$IP_ADDRESS${NC}"
     echo ""
+    
+    if [ "$use_auto_discover" = true ]; then
+        echo -e "  ${CYAN}提示: 当前使用自动发现模式${NC}"
+        echo -e "  ${CYAN}如需自定义服务，请编辑: $CONFIG_FILE${NC}"
+        echo ""
+    fi
     
     log_info "仪表盘更新完成，耗时 ${duration} 秒"
 }

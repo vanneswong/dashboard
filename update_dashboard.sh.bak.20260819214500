@@ -5,8 +5,8 @@
 # ============================================================================
 # 功能：自动发现服务、健康检查、生成Web仪表盘
 # 作者：MiMo
-# 版本：v3.5
-# 更新：支持简化配置格式（端口|标题|简介），自动检测访问权限
+# 版本：v3.4
+# 更新：支持自动发现服务，无需手动配置
 # ============================================================================
 
 set -euo pipefail
@@ -254,80 +254,6 @@ get_service_desc() {
     echo "运行在端口 $port 的服务 - $name"
 }
 
-# 自动检测端口访问权限
-detect_access_type() {
-    local port="$1"
-    local access="local"
-    
-    # 检查UFW防火墙规则
-    if command -v ufw &>/dev/null; then
-        local ufw_status
-        ufw_status=$(ufw status 2>/dev/null)
-        
-        # 检查UFW是否启用
-        if echo "$ufw_status" | grep -q "Status: active"; then
-            # 检查是否有允许Anywhere的规则
-            if echo "$ufw_status" | grep -qE "${port}.*ALLOW.*Anywhere"; then
-                access="global"
-            fi
-        else
-            # UFW未启用，检查iptables
-            if command -v iptables &>/dev/null; then
-                local policy
-                policy=$(iptables -L INPUT -n 2>/dev/null | head -1 | grep -oP 'policy \K\w+')
-                if [ "$policy" = "ACCEPT" ]; then
-                    # 默认策略是ACCEPT，没有明确规则则为global
-                    access="global"
-                fi
-            else
-                # 无法确定，默认为global（无防火墙）
-                access="global"
-            fi
-        fi
-    elif command -v iptables &>/dev/null; then
-        # 没有UFW，检查iptables
-        local policy
-        policy=$(iptables -L INPUT -n 2>/dev/null | head -1 | grep -oP 'policy \K\w+')
-        if [ "$policy" = "ACCEPT" ]; then
-            access="global"
-        fi
-    else
-        # 无防火墙工具，默认为global
-        access="global"
-    fi
-    
-    echo "$access"
-}
-
-# 解析服务配置行（支持简化格式和完整格式）
-parse_service_line() {
-    local line="$1"
-    local port name access desc color btn_color
-    
-    # 计算字段数量
-    local field_count
-    field_count=$(echo "$line" | awk -F'|' '{print NF}')
-    
-    if [ "$field_count" -eq 3 ]; then
-        # 简化格式: 端口|标题|简介
-        IFS='|' read -r port name desc <<< "$line"
-        access=$(detect_access_type "$port")
-        color="auto"
-        btn_color="auto"
-    elif [ "$field_count" -ge 6 ]; then
-        # 完整格式: 端口|服务名称|访问权限|描述|卡片颜色|按钮颜色
-        IFS='|' read -r port name access desc color btn_color <<< "$line"
-    else
-        # 字段数量不正确，尝试解析并填充默认值
-        IFS='|' read -r port name desc <<< "$line"
-        access=$(detect_access_type "$port")
-        color="auto"
-        btn_color="auto"
-    fi
-    
-    echo "${port}|${name}|${access}|${desc}|${color}|${btn_color}"
-}
-
 # 自动发现服务
 auto_discover_services() {
     local -A discovered_ports
@@ -362,12 +288,12 @@ auto_discover_services() {
         fi
         discovered_ports["$port"]=1
         
-        local name desc access
+        local name desc
         name=$(get_service_name "$port")
         desc=$(get_service_desc "$port" "$name")
-        access=$(detect_access_type "$port")
         
-        echo "$port|$name|$access|$desc|auto|auto"
+        # 使用换行符分隔，而不是空格
+        echo "$port|$name|local|$desc|auto|auto"
     done
 }
 
@@ -440,19 +366,7 @@ generate_card() {
             ;;
     esac
     
-    # 生成服务URL（HTTPS端口使用https协议）
-    local service_url
-    local https_ports="443 8443 4443 9443"
-    if echo "$https_ports" | grep -qw "$port"; then
-        # HTTPS端口：443端口省略端口号，其他显示端口
-        if [ "$port" -eq 443 ]; then
-            service_url="https://${IP_ADDRESS}"
-        else
-            service_url="https://${IP_ADDRESS}:${port}"
-        fi
-    else
-        service_url="http://${IP_ADDRESS}:${port}"
-    fi
+    local service_url="http://${IP_ADDRESS}:${port}"
     
     # 处理无端口的服务（如 cron 服务）
     local port_display="端口: $port"
@@ -768,7 +682,7 @@ HTMLEOF
 main() {
     local start_time
     start_time=$(date +%s)
-    local VERSION="v3.5"
+    local VERSION="v3.4"
     
     echo -e "${BLUE}╔══════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║        服务仪表盘更新脚本 $VERSION         ║${NC}"
@@ -790,10 +704,11 @@ main() {
     log_info "获取服务列表..."
     local -A seen_ports
     local services=()
-    local config_count=0
+    local use_auto_discover=false
     
-    # 第一步：从配置文件加载服务（优先级最高）
+    # 从配置文件加载服务
     if [ -f "$CONFIG_FILE" ] && [ -s "$CONFIG_FILE" ]; then
+        # 检查配置文件是否有有效内容（非注释行）
         local valid_lines
         valid_lines=$(grep -cE "^[0-9]+\|" "$CONFIG_FILE" 2>/dev/null || echo "0")
         
@@ -805,42 +720,44 @@ main() {
                     port=$(echo "$line" | cut -d'|' -f1)
                     if [ -z "${seen_ports[$port]:-}" ]; then
                         seen_ports["$port"]=1
-                        local parsed_line
-                        parsed_line=$(parse_service_line "$line")
-                        services+=("$parsed_line")
-                        config_count=$((config_count + 1))
-                        log_info "配置服务: $(echo "$parsed_line" | cut -d'|' -f2) (端口 $port)"
+                        services+=("$line")
                     fi
                 fi
             done < "$CONFIG_FILE"
-            log_info "从配置文件加载了 $config_count 个服务"
+            log_info "从配置文件加载了 ${#services[@]} 个服务"
+        else
+            use_auto_discover=true
+            log_info "配置文件为空，使用自动发现模式"
         fi
+    else
+        use_auto_discover=true
+        log_info "配置文件不存在，使用自动发现模式"
     fi
     
-    # 第二步：自动发现本机运行的服务（与配置文件合并）
-    echo -e "${CYAN}正在自动发现本机服务...${NC}"
-    log_info "自动扫描本机运行的服务..."
-    local auto_count=0
-    
-    while IFS= read -r service; do
-        [ -z "$service" ] && continue
-        local port name
-        port=$(echo "$service" | cut -d'|' -f1)
-        name=$(echo "$service" | cut -d'|' -f2)
-        if [ -z "${seen_ports[$port]:-}" ]; then
-            seen_ports["$port"]=1
-            services+=("$service")
-            auto_count=$((auto_count + 1))
-            log_info "自动发现: $name (端口 $port)"
-        fi
-    done < <(auto_discover_services)
-    
-    if [ "$auto_count" -gt 0 ]; then
-        log_info "自动发现了 $auto_count 个新服务"
+    # 自动发现服务
+    if [ "$use_auto_discover" = true ]; then
+        echo -e "${CYAN}正在自动发现本机服务...${NC}"
+        log_info "自动扫描本机运行的服务..."
+        
+        # 使用while read循环正确处理换行符分隔的输出
+        while IFS= read -r service; do
+            [ -z "$service" ] && continue
+            local port name
+            port=$(echo "$service" | cut -d'|' -f1)
+            name=$(echo "$service" | cut -d'|' -f2)
+            if [ -z "${seen_ports[$port]:-}" ]; then
+                seen_ports["$port"]=1
+                services+=("$service")
+                log_info "  发现服务: $name (端口 $port)"
+            fi
+        done < <(auto_discover_services)
+        
+        log_info "自动发现了 ${#services[@]} 个服务"
     fi
     
-    # 第三步：扫描Nginx配置（补充发现）
-    if [ "${SCAN_NGINX:-true}" = "true" ]; then
+    # 扫描Nginx配置（可选）
+    if [ "${SCAN_NGINX:-true}" = "true" ] && [ "$use_auto_discover" = false ]; then
+        log_info "扫描Nginx配置..."
         while IFS= read -r line; do
             [ -z "$line" ] && continue
             local port
@@ -848,7 +765,7 @@ main() {
             if [ -z "${seen_ports[$port]:-}" ]; then
                 seen_ports["$port"]=1
                 services+=("$line")
-                log_info "Nginx发现: $(echo "$line" | cut -d'|' -f2) (端口 $port)"
+                log_info "从Nginx发现: $(echo "$line" | cut -d'|' -f2) (端口 $port)"
             fi
         done <<< "$(scan_nginx)"
     fi
@@ -960,13 +877,11 @@ main() {
     echo -e "  访问地址: ${BLUE}http://$IP_ADDRESS${NC}"
     echo ""
     
-    if [ "$config_count" -gt 0 ]; then
-        echo -e "  ${CYAN}配置服务: $config_count 个 | 自动发现: $auto_count 个${NC}"
-    else
+    if [ "$use_auto_discover" = true ]; then
         echo -e "  ${CYAN}提示: 当前使用自动发现模式${NC}"
-        echo -e "  ${CYAN}如需自定义服务名称，请编辑: $CONFIG_FILE${NC}"
+        echo -e "  ${CYAN}如需自定义服务，请编辑: $CONFIG_FILE${NC}"
+        echo ""
     fi
-    echo ""
     
     log_info "仪表盘更新完成，耗时 ${duration} 秒"
 }

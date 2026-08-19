@@ -934,6 +934,14 @@ main() {
     # 备份并更新
     if [ -f "$DASHBOARD_FILE" ]; then
         cp "$DASHBOARD_FILE" "$DASHBOARD_FILE.backup.$(date +%Y%m%d%H%M%S)"
+        
+        # 清理旧备份，只保留最近5份
+        local backup_count
+        backup_count=$(ls -1 "$DASHBOARD_FILE".backup.* 2>/dev/null | wc -l)
+        if [ "$backup_count" -gt 5 ]; then
+            ls -1t "$DASHBOARD_FILE".backup.* | tail -n +6 | xargs rm -f
+            log_info "清理旧备份文件，保留最近5份"
+        fi
     fi
     
     cp "$TEMP_FILE" "$DASHBOARD_FILE"

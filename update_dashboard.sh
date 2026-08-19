@@ -161,10 +161,88 @@ check_port() {
     return 1
 }
 
+# 非HTTP服务端口列表（数据库、缓存、消息队列等）
+NON_HTTP_SERVICES="3306 33060 5432 6379 11211 27017 5672 9092 9300"
+
+# 检查是否是非HTTP服务
+is_non_http_service() {
+    local port="$1"
+    if echo "$NON_HTTP_SERVICES" | grep -qw "$port"; then
+        return 0  # 是非HTTP服务
+    fi
+    return 1      # 是HTTP服务
+}
+
+# 非HTTP服务健康检查（数据库、缓存等）
+check_non_http() {
+    local port="$1"
+    
+    # MySQL端口 - 尝试TCP连接
+    if [ "$port" -eq 3306 ] || [ "$port" -eq 33060 ]; then
+        if command -v mysqladmin &>/dev/null; then
+            # 使用mysqladmin ping检查
+            if mysqladmin ping -h 127.0.0.1 -P "$port" --connect-timeout="$TIMEOUT_SECONDS" &>/dev/null; then
+                return 0
+            fi
+        fi
+        # 备用方案：检查TCP连接
+        if timeout "$TIMEOUT_SECONDS" bash -c "echo > /dev/tcp/127.0.0.1/$port" &>/dev/null; then
+            return 0
+        fi
+        return 1
+    fi
+    
+    # PostgreSQL端口
+    if [ "$port" -eq 5432 ]; then
+        if command -v pg_isready &>/dev/null; then
+            if pg_isready -h 127.0.0.1 -p "$port" -t "$TIMEOUT_SECONDS" &>/dev/null; then
+                return 0
+            fi
+        fi
+        if timeout "$TIMEOUT_SECONDS" bash -c "echo > /dev/tcp/127.0.0.1/$port" &>/dev/null; then
+            return 0
+        fi
+        return 1
+    fi
+    
+    # Redis端口
+    if [ "$port" -eq 6379 ]; then
+        if command -v redis-cli &>/dev/null; then
+            if redis-cli -h 127.0.0.1 -p "$port" -t "$TIMEOUT_SECONDS" ping &>/dev/null; then
+                return 0
+            fi
+        fi
+        if timeout "$TIMEOUT_SECONDS" bash -c "echo > /dev/tcp/127.0.0.1/$port" &>/dev/null; then
+            return 0
+        fi
+        return 1
+    fi
+    
+    # MongoDB端口
+    if [ "$port" -eq 27017 ]; then
+        if timeout "$TIMEOUT_SECONDS" bash -c "echo > /dev/tcp/127.0.0.1/$port" &>/dev/null; then
+            return 0
+        fi
+        return 1
+    fi
+    
+    # 其他非HTTP服务 - 只检查TCP连接
+    if timeout "$TIMEOUT_SECONDS" bash -c "echo > /dev/tcp/127.0.0.1/$port" &>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
 # HTTP健康检查
 check_http() {
     local port="$1"
     local code body
+    
+    # 非HTTP服务使用专门的检查方法
+    if is_non_http_service "$port"; then
+        check_non_http "$port"
+        return $?
+    fi
     
     response=$(curl -s --max-time "$TIMEOUT_SECONDS" -w "\n%{http_code}" "http://127.0.0.1:$port" 2>/dev/null || echo -e "\n000")
     code=$(echo "$response" | tail -1)

@@ -161,8 +161,8 @@ check_port() {
     return 1
 }
 
-# 非HTTP服务端口列表（数据库、缓存、消息队列等）
-NON_HTTP_SERVICES="3306 33060 5432 6379 11211 27017 5672 9092 9300"
+# 非HTTP服务端口列表（数据库、缓存、消息队列、代理、BT客户端等）
+NON_HTTP_SERVICES="3306 33060 5432 6379 11211 27017 5672 9092 9300 5620 6800 10808 10809 16385 51413"
 
 # 检查是否是非HTTP服务
 is_non_http_service() {
@@ -226,7 +226,66 @@ check_non_http() {
         return 1
     fi
     
-    # 其他非HTTP服务 - 只检查TCP连接
+    # qBittorrent BT端口 - 只检查TCP连接
+    if [ "$port" -eq 5620 ]; then
+        if timeout "$TIMEOUT_SECONDS" bash -c "echo > /dev/tcp/127.0.0.1/$port" &>/dev/null; then
+            return 0
+        fi
+        return 1
+    fi
+    
+    # Aria2 RPC端口 - 检查JSON-RPC接口
+    if [ "$port" -eq 6800 ]; then
+        # 尝试JSON-RPC调用
+        if command -v curl &>/dev/null; then
+            local rpc_response
+            rpc_response=$(curl -s --max-time "$TIMEOUT_SECONDS" -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","method":"aria2.getVersion","id":1}' "http://127.0.0.1:$port/jsonrpc" 2>/dev/null)
+            if echo "$rpc_response" | grep -q '"result"' 2>/dev/null; then
+                return 0
+            fi
+        fi
+        # 备用方案：TCP连接检查
+        if timeout "$TIMEOUT_SECONDS" bash -c "echo > /dev/tcp/127.0.0.1/$port" &>/dev/null; then
+            return 0
+        fi
+        return 1
+    fi
+    
+    # V2Ray SOCKS5代理端口 - 只检查TCP连接
+    if [ "$port" -eq 10808 ]; then
+        if timeout "$TIMEOUT_SECONDS" bash -c "echo > /dev/tcp/127.0.0.1/$port" &>/dev/null; then
+            return 0
+        fi
+        return 1
+    fi
+    
+    # V2Ray HTTP代理端口 - 检查HTTP代理响应
+    if [ "$port" -eq 10809 ]; then
+        # HTTP代理通常返回400或405给普通请求
+        if command -v curl &>/dev/null; then
+            local http_code
+            http_code=$(curl -s --max-time "$TIMEOUT_SECONDS" -o /dev/null -w "%{http_code}" "http://127.0.0.1:$port" 2>/dev/null || echo "000")
+            # 代理服务通常返回400/405/501等，说明服务正在运行
+            if [[ "$http_code" =~ ^[45] ]]; then
+                return 0
+            fi
+        fi
+        # 备用方案：TCP连接检查
+        if timeout "$TIMEOUT_SECONDS" bash -c "echo > /dev/tcp/127.0.0.1/$port" &>/dev/null; then
+            return 0
+        fi
+        return 1
+    fi
+    
+    # Transmission BT端口 - 只检查TCP连接
+    if [ "$port" -eq 51413 ]; then
+        if timeout "$TIMEOUT_SECONDS" bash -c "echo > /dev/tcp/127.0.0.1/$port" &>/dev/null; then
+            return 0
+        fi
+        return 1
+    fi
+    
+    # 未知非HTTP服务（如16385）- 只检查TCP连接
     if timeout "$TIMEOUT_SECONDS" bash -c "echo > /dev/tcp/127.0.0.1/$port" &>/dev/null; then
         return 0
     fi

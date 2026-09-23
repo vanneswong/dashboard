@@ -32,7 +32,31 @@ resolve_script_dir() {
 EXCLUDE_PORTS="${EXCLUDE_PORTS:-22000}"
 
 SCRIPT_DIR="$(resolve_script_dir)"
-CONFIG_FILE="${DASHBOARD_CONFIG:-$SCRIPT_DIR/conf/services.conf}"
+
+# 自动查找配置文件（优先查找TOML格式）
+find_config_file() {
+    local dir="$1"
+    
+    # 优先查找TOML格式
+    for name in "service.toml" "services.toml" "config.toml"; do
+        if [ -f "$dir/$name" ] && [ -s "$dir/$name" ]; then
+            echo "$dir/$name"
+            return 0
+        fi
+    done
+    
+    # 然后查找conf格式
+    for name in "services.conf" "service.conf" "config.conf"; do
+        if [ -f "$dir/$name" ] && [ -s "$dir/$name" ]; then
+            echo "$dir/$name"
+            return 0
+        fi
+    done
+    
+    return 1
+}
+
+CONFIG_FILE="${DASHBOARD_CONFIG:-$(find_config_file "$SCRIPT_DIR/conf" || echo "$SCRIPT_DIR/conf/services.conf")}"
 DASHBOARD_DIR="${DASHBOARD_DIR:-/var/www/dashboard}"
 DASHBOARD_FILE="$DASHBOARD_DIR/index.html"
 TEMP_FILE="/tmp/dashboard_update.html"

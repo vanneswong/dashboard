@@ -1,0 +1,18 @@
+# 全局配置（可选）
+[global]
+exclude_ports = [22000]
+
+# 服务配置
+[[services]]
+port = 8384
+name = "Syncthing"
+desc = "流行的文件同步应用"
+
+# 完整配置
+[[services]]
+port = 10000
+name = "服务仪表盘"
+desc = "服务监控面板"
+access = "local"           # 访问权限: global(公网) 或 local(局域网)
+color = "auto"             # 卡片颜色: auto 或 CSS渐变/十六进制颜色
+btn_color = "auto"         # 按钮颜色: auto 或 十六进制颜色

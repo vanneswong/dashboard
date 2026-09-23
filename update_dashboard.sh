@@ -440,6 +440,134 @@ detect_access_type() {
     echo "$access"
 }
 
+# 解析TOML格式的配置文件
+parse_toml_config() {
+    local config_file="$1"
+    local -n services_ref=$2
+    
+    # 检查是否为TOML格式（包含[[services]]）
+    if ! grep -q '\[\[services\]\]' "$config_file"; then
+        return 1  # 不是TOML格式
+    fi
+    
+    local port name access desc color btn_color
+    local in_service=false
+    local line_num=0
+    
+    while IFS= read -r line || [ -n "$line" ]; do
+        line_num=$((line_num + 1))
+        
+        # 跳过注释和空行
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line// }" ]] && continue
+        
+        # 检查是否是新的服务配置块
+        if [[ "$line" =~ ^\[\[services\]\] ]]; then
+            # 保存上一个服务（如果存在）
+            if [ "$in_service" = true ] && [ -n "$port" ]; then
+                [ -z "$access" ] && access=$(detect_access_type "$port")
+                [ -z "$color" ] && color="auto"
+                [ -z "$btn_color" ] && btn_color="auto"
+                services_ref+=("${port}|${name}|${access}|${desc}|${color}|${btn_color}")
+            fi
+            
+            # 重置变量
+            port=""
+            name=""
+            access=""
+            desc=""
+            color="auto"
+            btn_color="auto"
+            in_service=true
+            continue
+        fi
+        
+        # 解析配置项
+        if [ "$in_service" = true ]; then
+            # 提取键值对
+            if [[ "$line" =~ ^[[:space:]]*([a-zA-Z_]+)[[:space:]]*=[[:space:]]*(.+)$ ]]; then
+                local key="${BASH_REMATCH[1]}"
+                local value="${BASH_REMATCH[2]}"
+                
+                # 移除引号
+                value=$(echo "$value" | sed 's/^["\x27]\|["\x27]$//g')
+                
+                case "$key" in
+                    port)
+                        port="$value"
+                        ;;
+                    name)
+                        name="$value"
+                        ;;
+                    desc)
+                        desc="$value"
+                        ;;
+                    access)
+                        access="$value"
+                        ;;
+                    color)
+                        color="$value"
+                        ;;
+                    btn_color)
+                        btn_color="$value"
+                        ;;
+                esac
+            fi
+        fi
+    done < "$config_file"
+    
+    # 保存最后一个服务
+    if [ "$in_service" = true ] && [ -n "$port" ]; then
+        [ -z "$access" ] && access=$(detect_access_type "$port")
+        [ -z "$color" ] && color="auto"
+        [ -z "$btn_color" ] && btn_color="auto"
+        services_ref+=("${port}|${name}|${access}|${desc}|${color}|${btn_color}")
+    fi
+    
+    return 0
+}
+
+# 解析TOML配置中的全局配置（如exclude_ports）
+parse_toml_global() {
+    local config_file="$1"
+    
+    # 检查是否为TOML格式
+    if ! grep -q '\[global\]' "$config_file"; then
+        return 1
+    fi
+    
+    local in_global=false
+    
+    while IFS= read -r line || [ -n "$line" ]; do
+        # 跳过注释和空行
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line// }" ]] && continue
+        
+        # 检查是否进入global配置块
+        if [[ "$line" =~ ^\[global\] ]]; then
+            in_global=true
+            continue
+        fi
+        
+        # 检查是否离开global配置块（进入其他配置块）
+        if [[ "$line" =~ ^\[ ]] && [ "$in_global" = true ]; then
+            in_global=false
+            continue
+        fi
+        
+        # 解析exclude_ports配置
+        if [ "$in_global" = true ] && [[ "$line" =~ ^[[:space:]]*exclude_ports[[:space:]]*=[[:space:]]*\[(.*)\] ]]; then
+            local ports_str="${BASH_REMATCH[1]}"
+            # 移除引号和空格，转换为空格分隔的列表
+            ports_str=$(echo "$ports_str" | sed 's/["\x27]//g' | tr ',' ' ')
+            echo "$ports_str"
+            return 0
+        fi
+    done < "$config_file"
+    
+    return 1
+}
+
 # 解析服务配置行（支持简化格式和完整格式）
 parse_service_line() {
     local line="$1"
@@ -909,7 +1037,7 @@ HTMLEOF
 main() {
     local start_time
     start_time=$(date +%s)
-    local VERSION="v3.5"
+    local VERSION="v3.6"
     
     echo -e "${BLUE}╔══════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║        服务仪表盘更新脚本 $VERSION         ║${NC}"
@@ -935,26 +1063,58 @@ main() {
     
     # 第一步：从配置文件加载服务（优先级最高）
     if [ -f "$CONFIG_FILE" ] && [ -s "$CONFIG_FILE" ]; then
-        local valid_lines
-        valid_lines=$(grep -cE "^[0-9]+\|" "$CONFIG_FILE" 2>/dev/null || echo "0")
-        
-        if [ "$valid_lines" -gt 0 ]; then
-            while IFS= read -r line; do
-                [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
-                if [[ "$line" =~ ^[0-9]+\| ]]; then
+        # 检测配置文件格式（TOML或旧格式）
+        if grep -q '\[\[services\]\]' "$CONFIG_FILE" 2>/dev/null; then
+            # TOML格式
+            log_info "检测到TOML格式配置文件"
+            
+            # 解析全局配置（如exclude_ports）
+            local toml_exclude_ports
+            toml_exclude_ports=$(parse_toml_global "$CONFIG_FILE" 2>/dev/null || echo "")
+            if [ -n "$toml_exclude_ports" ]; then
+                EXCLUDE_PORTS="$EXCLUDE_PORTS $toml_exclude_ports"
+                log_info "从TOML配置加载排除端口: $toml_exclude_ports"
+            fi
+            
+            # 解析服务配置
+            local toml_services=()
+            if parse_toml_config "$CONFIG_FILE" toml_services; then
+                for service in "${toml_services[@]}"; do
                     local port
-                    port=$(echo "$line" | cut -d'|' -f1)
+                    port=$(echo "$service" | cut -d'|' -f1)
                     if [ -z "${seen_ports[$port]:-}" ]; then
                         seen_ports["$port"]=1
-                        local parsed_line
-                        parsed_line=$(parse_service_line "$line")
-                        services+=("$parsed_line")
+                        services+=("$service")
                         config_count=$((config_count + 1))
-                        log_info "配置服务: $(echo "$parsed_line" | cut -d'|' -f2) (端口 $port)"
+                        log_info "配置服务: $(echo "$service" | cut -d'|' -f2) (端口 $port)"
                     fi
-                fi
-            done < "$CONFIG_FILE"
-            log_info "从配置文件加载了 $config_count 个服务"
+                done
+                log_info "从TOML配置文件加载了 $config_count 个服务"
+            fi
+        else
+            # 旧格式（兼容）
+            log_info "检测到旧格式配置文件"
+            local valid_lines
+            valid_lines=$(grep -cE "^[0-9]+\|" "$CONFIG_FILE" 2>/dev/null || echo "0")
+            
+            if [ "$valid_lines" -gt 0 ]; then
+                while IFS= read -r line; do
+                    [[ "$line" =~ ^#.*$ || -z "$line" ]] && continue
+                    if [[ "$line" =~ ^[0-9]+\| ]]; then
+                        local port
+                        port=$(echo "$line" | cut -d'|' -f1)
+                        if [ -z "${seen_ports[$port]:-}" ]; then
+                            seen_ports["$port"]=1
+                            local parsed_line
+                            parsed_line=$(parse_service_line "$line")
+                            services+=("$parsed_line")
+                            config_count=$((config_count + 1))
+                            log_info "配置服务: $(echo "$parsed_line" | cut -d'|' -f2) (端口 $port)"
+                        fi
+                    fi
+                done < "$CONFIG_FILE"
+                log_info "从配置文件加载了 $config_count 个服务"
+            fi
         fi
     fi
     

@@ -2,6 +2,12 @@
 
 一个轻量级的服务监控仪表盘，支持自动发现服务、健康检查并生成美观的Web界面。
 
+## 📸 界面预览
+
+![服务仪表盘界面](screenshots/dashboard.svg)
+
+*服务仪表盘主界面，展示服务状态、健康率统计和服务卡片*
+
 ## 功能特性
 
 - 🔍 **自动服务发现** - 无需手动配置，自动扫描本机运行的服务
@@ -289,9 +295,32 @@ tail -f /var/log/dashboard_update.log
 
 ## 许可证
 
-MIT License
+本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情
+
+### MIT 许可证摘要
+
+- ✅ 商业使用
+- ✅ 修改
+- ✅ 分发
+- ✅ 私人使用
+- ❌ 责任
+- ❌ 保证
 
 ## GitHub仓库
 
 - **SSH:** `git@github.com:vanneswong/dashboard.git`
 - **HTTPS:** `https://github.com/vanneswong/dashboard.git`
+
+## 贡献
+
+欢迎提交 Issue 和 Pull Request！
+
+1. Fork 本仓库
+2. 创建你的特性分支 (`git checkout -b feature/AmazingFeature`)
+3. 提交你的更改 (`git commit -m 'Add some AmazingFeature'`)
+4. 推送到分支 (`git push origin feature/AmazingFeature`)
+5. 打开一个 Pull Request
+
+## 致谢
+
+感谢所有贡献者的支持！

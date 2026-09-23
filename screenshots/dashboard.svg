@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800" viewBox="0 0 1200 800">
+  <defs>
+    <linearGradient id="headerGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#27ae60;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#2ecc71;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="cardGradient1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#27ae60;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#2ecc71;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="cardGradient2" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#3498db;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#2980b9;stop-opacity:1" />
+    </linearGradient>
+    <linearGradient id="cardGradient3" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#9b59b6;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#8e44ad;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <!-- 背景 -->
+  <rect width="1200" height="800" fill="#f5f7fa"/>
+  
+  <!-- 头部 -->
+  <rect x="0" y="0" width="1200" height="120" fill="url(#headerGradient)"/>
+  <text x="600" y="70" font-family="Arial, sans-serif" font-size="36" font-weight="bold" fill="white" text-anchor="middle">服务仪表盘</text>
+  <text x="600" y="100" font-family="Arial, sans-serif" font-size="16" fill="rgba(255,255,255,0.8)" text-anchor="middle">系统监控</text>
+  
+  <!-- 统计卡片 -->
+  <rect x="50" y="150" width="200" height="100" rx="8" fill="white" stroke="#e8e8e8" stroke-width="1"/>
+  <text x="150" y="190" font-family="Arial, sans-serif" font-size="32" font-weight="bold" fill="#333" text-anchor="middle">7</text>
+  <text x="150" y="220" font-family="Arial, sans-serif" font-size="14" fill="#666" text-anchor="middle">总服务数</text>
+  
+  <rect x="280" y="150" width="200" height="100" rx="8" fill="white" stroke="#e8e8e8" stroke-width="1"/>
+  <text x="380" y="190" font-family="Arial, sans-serif" font-size="32" font-weight="bold" fill="#52c41a" text-anchor="middle">7</text>
+  <text x="380" y="220" font-family="Arial, sans-serif" font-size="14" fill="#666" text-anchor="middle">健康运行</text>
+  
+  <rect x="510" y="150" width="200" height="100" rx="8" fill="white" stroke="#e8e8e8" stroke-width="1"/>
+  <text x="610" y="190" font-family="Arial, sans-serif" font-size="32" font-weight="bold" fill="#faad14" text-anchor="middle">0</text>
+  <text x="610" y="220" font-family="Arial, sans-serif" font-size="14" fill="#666" text-anchor="middle">运行异常</text>
+  
+  <rect x="740" y="150" width="200" height="100" rx="8" fill="white" stroke="#e8e8e8" stroke-width="1"/>
+  <text x="840" y="190" font-family="Arial, sans-serif" font-size="32" font-weight="bold" fill="#ff4d4f" text-anchor="middle">0</text>
+  <text x="840" y="220" font-family="Arial, sans-serif" font-size="14" fill="#666" text-anchor="middle">已停止</text>
+  
+  <rect x="970" y="150" width="200" height="100" rx="8" fill="white" stroke="#e8e8e8" stroke-width="1"/>
+  <text x="1070" y="190" font-family="Arial, sans-serif" font-size="32" font-weight="bold" fill="#1890ff" text-anchor="middle">100%</text>
+  <text x="1070" y="220" font-family="Arial, sans-serif" font-size="14" fill="#666" text-anchor="middle">健康率</text>
+  
+  <!-- 服务卡片 -->
+  <rect x="50" y="300" width="350" height="200" rx="8" fill="white" stroke="#e8e8e8" stroke-width="1"/>
+  <rect x="50" y="300" width="350" height="60" rx="8" fill="url(#cardGradient1)"/>
+  <text x="70" y="335" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="white">Syncthing</text>
+  <text x="350" y="335" font-family="Arial, sans-serif" font-size="12" fill="rgba(255,255,255,0.8)" text-anchor="end">端口: 8384</text>
+  <text x="70" y="380" font-family="Arial, sans-serif" font-size="14" fill="#666">访问权限</text>
+  <text x="350" y="380" font-family="Arial, sans-serif" font-size="14" fill="#1890ff" text-anchor="end">局域网</text>
+  <text x="70" y="410" font-family="Arial, sans-serif" font-size="14" fill="#666">运行状态</text>
+  <text x="350" y="410" font-family="Arial, sans-serif" font-size="14" fill="#52c41a" text-anchor="end">健康</text>
+  <text x="70" y="450" font-family="Arial, sans-serif" font-size="13" fill="#666">流行的文件同步应用</text>
+  
+  <rect x="430" y="300" width="350" height="200" rx="8" fill="white" stroke="#e8e8e8" stroke-width="1"/>
+  <rect x="430" y="300" width="350" height="60" rx="8" fill="url(#cardGradient2)"/>
+  <text x="450" y="335" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="white">服务仪表盘</text>
+  <text x="730" y="335" font-family="Arial, sans-serif" font-size="12" fill="rgba(255,255,255,0.8)" text-anchor="end">端口: 10000</text>
+  <text x="450" y="380" font-family="Arial, sans-serif" font-size="14" fill="#666">访问权限</text>
+  <text x="730" y="380" font-family="Arial, sans-serif" font-size="14" fill="#1890ff" text-anchor="end">局域网</text>
+  <text x="450" y="410" font-family="Arial, sans-serif" font-size="14" fill="#666">运行状态</text>
+  <text x="730" y="410" font-family="Arial, sans-serif" font-size="14" fill="#52c41a" text-anchor="end">健康</text>
+  <text x="450" y="450" font-family="Arial, sans-serif" font-size="13" fill="#666">服务监控面板，展示本机部署的所有服务</text>
+  
+  <rect x="810" y="300" width="350" height="200" rx="8" fill="white" stroke="#e8e8e8" stroke-width="1"/>
+  <rect x="810" y="300" width="350" height="60" rx="8" fill="url(#cardGradient3)"/>
+  <text x="830" y="335" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="white">Systeminfo</text>
+  <text x="1110" y="335" font-family="Arial, sans-serif" font-size="12" fill="rgba(255,255,255,0.8)" text-anchor="end">端口: 10002</text>
+  <text x="830" y="380" font-family="Arial, sans-serif" font-size="14" fill="#666">访问权限</text>
+  <text x="1110" y="380" font-family="Arial, sans-serif" font-size="14" fill="#1890ff" text-anchor="end">局域网</text>
+  <text x="830" y="410" font-family="Arial, sans-serif" font-size="14" fill="#666">运行状态</text>
+  <text x="1110" y="410" font-family="Arial, sans-serif" font-size="14" fill="#52c41a" text-anchor="end">健康</text>
+  <text x="830" y="450" font-family="Arial, sans-serif" font-size="13" fill="#666">系统信息监控服务</text>
+  
+  <!-- 底部信息 -->
+  <text x="600" y="550" font-family="Arial, sans-serif" font-size="14" fill="#999" text-anchor="middle">服务仪表盘 v3.7 · 更新于 2024年09月23日 12:00 · 服务器: 192.168.10.98</text>
+</svg>

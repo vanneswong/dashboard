@@ -1,0 +1,46 @@
+# 全局配置（可选）
+[global]
+exclude_ports = [22000]
+
+# 服务配置
+[[services]]
+port = 8384
+name = "Syncthing"
+desc = "流行的文件同步应用"
+
+# 完整配置
+[[services]]
+port = 10000
+name = "服务仪表盘"
+desc = "服务监控面板"
+access = "local"           # 访问权限: global(公网) 或 local(局域网)
+
+# Photo Buddy
+[[services]]
+port = 10001
+name = "Photobuddy 手机相册"
+desc = "轻量级的手机相册管理应用"
+
+# 系统信息报告
+[[services]]
+port = 10002
+name = "系统信息报告"
+desc = "系统信息报告"
+
+# 红米手机通讯&短信
+[[services]]
+port = 10003
+name = "红米手机通讯&短信报告"
+desc = "红米手机通讯&短信报告，每天自动分析"
+
+# 发票助手代理版
+[[services]]
+port = 10004
+name = "发票助手代理版"
+desc = "发票助手代理版，管理多家企业发票"
+
+# 发票助理单企业版
+[[services]]
+port = 10005
+name = "发票助手单企业版"
+desc = "发票助手单企业版，只能管理一家企业的发票"

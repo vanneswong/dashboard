@@ -43,6 +43,10 @@ sudo ./install.sh
 如需自定义服务，编辑配置文件：
 
 ```bash
+# TOML格式（推荐）
+vim conf/service.toml
+
+# 或旧格式
 vim conf/services.conf
 ```
 
@@ -62,6 +66,12 @@ vim conf/services.conf
 # 使用自动颜色（健康绿色，停止深蓝色）
 3000|Grafana|local|监控可视化平台|auto|auto
 ```
+
+**配置文件查找顺序**：
+1. TOML格式：`service.toml` → `services.toml` → `config.toml`
+2. 旧格式：`services.conf` → `service.conf` → `config.conf`
+
+**注意**：脚本会自动查找第一个存在的配置文件，无需手动指定格式。
 
 ### 4. 更新仪表盘
 
@@ -87,13 +97,36 @@ dashboard/
 ├── uninstall.sh           # 卸载脚本
 ├── update_dashboard.sh    # 主更新脚本
 ├── conf/
-│   ├── services.conf      # 服务配置文件（本地，不上传Git）
+│   ├── service.toml       # TOML格式配置文件（推荐）
+│   ├── services.conf      # 旧格式配置文件（兼容）
 │   └── services.conf.example  # 配置模板
 └── nginx/
     └── dashboard.conf     # Nginx配置模板
 ```
 
 ## 配置说明
+
+### 配置文件
+
+脚本会自动查找配置文件，优先级如下：
+
+#### TOML格式（推荐）
+
+1. `conf/service.toml`
+2. `conf/services.toml`
+3. `conf/config.toml`
+
+#### 旧格式（兼容）
+
+4. `conf/services.conf`
+5. `conf/service.conf`
+6. `conf/config.conf`
+
+**注意**：
+- 脚本会自动识别配置文件格式（TOML或旧格式）
+- 无需手动指定格式，只需将配置文件放在 `conf/` 目录下即可
+- 如果存在多个配置文件，优先使用TOML格式
+- 可以通过环境变量 `DASHBOARD_CONFIG` 手动指定配置文件路径
 
 ### 服务配置格式
 
@@ -161,7 +194,7 @@ btn_color = "auto"         # 按钮颜色: auto 或 十六进制颜色
 
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
-| `DASHBOARD_CONFIG` | 配置文件路径 | `./conf/services.conf` |
+| `DASHBOARD_CONFIG` | 配置文件路径（手动指定时优先） | 自动查找 |
 | `DASHBOARD_DIR` | 输出目录 | `/var/www/dashboard` |
 | `DASHBOARD_LOG` | 日志文件路径 | `/var/log/dashboard_update.log` |
 | `DASHBOARD_IP` | 服务器IP地址 | 自动检测 |
@@ -245,6 +278,7 @@ tail -f /var/log/dashboard_update.log
 
 ## 版本历史
 
+- **v3.7** - 支持自动查找配置文件，优先TOML格式
 - **v3.6** - 支持TOML格式配置，更加易读和维护
 - **v3.5** - 支持排除端口配置，默认排除Syncthing传输端口22000
 - **v3.4** - 支持自动发现服务，智能颜色配置

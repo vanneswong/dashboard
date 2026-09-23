@@ -1061,7 +1061,7 @@ HTMLEOF
 main() {
     local start_time
     start_time=$(date +%s)
-    local VERSION="v3.6"
+    local VERSION="v3.7"
     
     echo -e "${BLUE}╔══════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║        服务仪表盘更新脚本 $VERSION         ║${NC}"

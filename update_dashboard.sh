@@ -27,6 +27,10 @@ resolve_script_dir() {
     cd -P "$(dirname "$source")" && pwd
 }
 
+# 排除端口配置（不显示在仪表盘上的端口，空格分隔）
+# Syncthing传输端口22000默认排除
+EXCLUDE_PORTS="${EXCLUDE_PORTS:-22000}"
+
 SCRIPT_DIR="$(resolve_script_dir)"
 CONFIG_FILE="${DASHBOARD_CONFIG:-$SCRIPT_DIR/conf/services.conf}"
 DASHBOARD_DIR="${DASHBOARD_DIR:-/var/www/dashboard}"
@@ -479,7 +483,7 @@ auto_discover_services() {
     fi
     
     # 过滤掉一些系统端口和不常用端口
-    local skip_ports="22 25 53 111 135 139 445 631 1433 1434 2019 3389 5355 5900 5938 6000 6001 6002 6003 6004 6005"
+    local skip_ports="22 25 53 111 135 139 445 631 1433 1434 2019 3389 5355 5900 5938 6000 6001 6002 6003 6004 6005 $EXCLUDE_PORTS"
     
     for port in $ports; do
         # 跳过小于1024的端口（除了常见的）

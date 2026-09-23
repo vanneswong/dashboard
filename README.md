@@ -127,9 +127,18 @@ dashboard/
 | `DASHBOARD_IP` | 服务器IP地址 | 自动检测 |
 | `DASHBOARD_TIMEOUT` | HTTP检查超时时间（秒） | 3 |
 | `SCAN_NGINX` | 是否扫描Nginx配置 | true |
+| `EXCLUDE_PORTS` | 排除的端口列表（空格分隔） | `22000` |
 | `COLOR_HEALTHY` | 健康服务颜色 | `linear-gradient(90deg, #27ae60, #2ecc71)\|#27ae60` |
 | `COLOR_STOPPED` | 停止服务颜色 | `linear-gradient(90deg, #34495e, #2c3e50)\|#34495e` |
 | `COLOR_UNHEALTHY` | 异常服务颜色 | `linear-gradient(90deg, #e67e22, #d35400)\|#e67e22` |
+
+**排除端口说明**：
+- `EXCLUDE_PORTS` 用于排除不需要显示在仪表盘上的端口
+- 多个端口用空格分隔，例如：`EXCLUDE_PORTS="22000 22001 22067"`
+- 常见需要排除的端口：
+  - Syncthing传输端口：22000、22067、21027
+  - BT下载端口：51413等
+  - 其他内部传输端口
 
 ## 定时任务
 
@@ -196,6 +205,7 @@ tail -f /var/log/dashboard_update.log
 
 ## 版本历史
 
+- **v3.5** - 支持排除端口配置，默认排除Syncthing传输端口22000
 - **v3.4** - 支持自动发现服务，智能颜色配置
 - **v3.3** - 绿色主题、优化间距和圆角
 - **v3.2** - 移除卡片边框颜色、改进健康检查逻辑

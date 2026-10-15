@@ -1,12 +1,13 @@
 #!/bin/bash
 # ============================================================================
-# 服务仪表盘更新脚本 v3.4
+# 服务仪表盘更新脚本 v3.8
 # 通用版本 - 适用于各类Linux服务器
 # ============================================================================
 # 功能：自动发现服务、健康检查、生成Web仪表盘
 # 作者：MiMo
-# 版本：v3.5
+# 版本：v3.8
 # 更新：支持简化配置格式（端口|标题|简介），自动检测访问权限
+#      支持Caddy反向代理发现、HTTPS协议自动识别、过滤未运行服务
 # ============================================================================
 
 set -euo pipefail
@@ -67,6 +68,9 @@ TIMEOUT_SECONDS="${DASHBOARD_TIMEOUT:-3}"
 COLOR_HEALTHY="${COLOR_HEALTHY:-linear-gradient(90deg, #27ae60, #2ecc71)|#27ae60}"
 COLOR_STOPPED="${COLOR_STOPPED:-linear-gradient(90deg, #34495e, #2c3e50)|#34495e}"
 COLOR_UNHEALTHY="${COLOR_UNHEALTHY:-linear-gradient(90deg, #e67e22, #d35400)|#e67e22}"
+
+# 反向代理（Nginx/Caddy）端口 -> 协议映射（detect_scheme 使用）
+declare -A PROXY_SCHEMES
 
 # 获取服务器IP地址（自动检测）
 get_ip_address() {
@@ -323,7 +327,9 @@ check_non_http() {
 # HTTP健康检查
 check_http() {
     local port="$1"
-    local code body
+    local scheme="${2:-http}"
+    local code body response
+    local curl_args
     
     # 非HTTP服务使用专门的检查方法
     if is_non_http_service "$port"; then
@@ -331,11 +337,20 @@ check_http() {
         return $?
     fi
     
-    response=$(curl -s --max-time "$TIMEOUT_SECONDS" -w "\n%{http_code}" "http://127.0.0.1:$port" 2>/dev/null || echo -e "\n000")
+    curl_args=(-s --max-time "$TIMEOUT_SECONDS" -w "\n%{http_code}")
+    if [ "$scheme" = "https" ]; then
+        curl_args+=(-k)
+        response=$(curl "${curl_args[@]}" "https://127.0.0.1:$port" 2>/dev/null || echo -e "\n000")
+    else
+        response=$(curl "${curl_args[@]}" "http://127.0.0.1:$port" 2>/dev/null || echo -e "\n000")
+    fi
     code=$(echo "$response" | tail -1)
     body=$(echo "$response" | sed '$d')
     
     if [[ "$code" =~ ^[23] ]]; then
+        return 0
+    elif [[ "$code" =~ ^3 ]]; then
+        # 301/302/308 等重定向（如HTTP跳转HTTPS）也视为健康
         return 0
     elif [[ "$code" == "401" ]] || [[ "$code" == "403" ]]; then
         return 0
@@ -474,7 +489,7 @@ parse_toml_config() {
         return 1  # 不是TOML格式
     fi
     
-    local port name access desc color btn_color
+    local port name access desc color btn_color scheme
     local in_service=false
     local line_num=0
     
@@ -492,7 +507,8 @@ parse_toml_config() {
                 [ -z "$access" ] && access=$(detect_access_type "$port")
                 [ -z "$color" ] && color="auto"
                 [ -z "$btn_color" ] && btn_color="auto"
-                services_ref+=("${port}|${name}|${access}|${desc}|${color}|${btn_color}")
+                [ -z "$scheme" ] && scheme="auto"
+                services_ref+=("${port}|${name}|${access}|${desc}|${color}|${btn_color}|${scheme}")
             fi
             
             # 重置变量
@@ -502,6 +518,7 @@ parse_toml_config() {
             desc=""
             color="auto"
             btn_color="auto"
+            scheme="auto"
             in_service=true
             continue
         fi
@@ -535,6 +552,16 @@ parse_toml_config() {
                     btn_color)
                         btn_color="$value"
                         ;;
+                    scheme|protocol)
+                        scheme="$value"
+                        ;;
+                    https)
+                        case "$value" in
+                            true|1|yes|on) scheme="https" ;;
+                            false|0|no|off) scheme="http" ;;
+                            *) scheme="$value" ;;
+                        esac
+                        ;;
                 esac
             fi
         fi
@@ -545,7 +572,8 @@ parse_toml_config() {
         [ -z "$access" ] && access=$(detect_access_type "$port")
         [ -z "$color" ] && color="auto"
         [ -z "$btn_color" ] && btn_color="auto"
-        services_ref+=("${port}|${name}|${access}|${desc}|${color}|${btn_color}")
+        [ -z "$scheme" ] && scheme="auto"
+        services_ref+=("${port}|${name}|${access}|${desc}|${color}|${btn_color}|${scheme}")
     fi
     
     return 0
@@ -595,12 +623,13 @@ parse_toml_global() {
 # 解析服务配置行（支持简化格式和完整格式）
 parse_service_line() {
     local line="$1"
-    local port name access desc color btn_color
+    local port name access desc color btn_color scheme
     
     # 计算字段数量
     local field_count
     field_count=$(echo "$line" | awk -F'|' '{print NF}')
     
+    scheme="auto"
     if [ "$field_count" -eq 3 ]; then
         # 简化格式: 端口|标题|简介
         IFS='|' read -r port name desc <<< "$line"
@@ -608,8 +637,9 @@ parse_service_line() {
         color="auto"
         btn_color="auto"
     elif [ "$field_count" -ge 6 ]; then
-        # 完整格式: 端口|服务名称|访问权限|描述|卡片颜色|按钮颜色
-        IFS='|' read -r port name access desc color btn_color <<< "$line"
+        # 完整格式: 端口|服务名称|访问权限|描述|卡片颜色|按钮颜色[|协议]
+        IFS='|' read -r port name access desc color btn_color scheme <<< "$line"
+        [ -z "$scheme" ] && scheme="auto"
     else
         # 字段数量不正确，尝试解析并填充默认值
         IFS='|' read -r port name desc <<< "$line"
@@ -618,7 +648,7 @@ parse_service_line() {
         btn_color="auto"
     fi
     
-    echo "${port}|${name}|${access}|${desc}|${color}|${btn_color}"
+    echo "${port}|${name}|${access}|${desc}|${color}|${btn_color}|${scheme}"
 }
 
 # 自动发现服务
@@ -660,7 +690,7 @@ auto_discover_services() {
         desc=$(get_service_desc "$port" "$name")
         access=$(detect_access_type "$port")
         
-        echo "$port|$name|$access|$desc|auto|auto"
+        echo "$port|$name|$access|$desc|auto|auto|auto"
     done
 }
 
@@ -681,13 +711,161 @@ scan_nginx() {
         name=$(basename "$f" | sed 's/-/ /g' | sed 's/\b\(.\)/\u\1/g')
         [ "$name" = "default" ] && continue
         
-        echo "$port|$name|local|Nginx服务|auto|auto"
+        local scheme="http"
+        if grep -qE "ssl_certificate|ssl_protocols|ssl[[:space:]]+on|listen[[:space:]]+[0-9]+[[:space:]]+ssl" "$f" 2>/dev/null; then
+            scheme="https"
+        fi
+        
+        echo "$port|$name|local|Nginx服务|auto|auto|$scheme"
     done
+}
+
+# 解析 Caddyfile：输出服务行（端口|名称|访问权限|描述|颜色|按钮颜色|协议），并记录端口协议
+parse_caddyfile() {
+    local file="$1"
+    local in_block=false
+    local nested=0
+    local addr="" port="" scheme="" name="" desc=""
+    local line
+    
+    while IFS= read -r line || [ -n "$line" ]; do
+        # 从注释中提取服务名称/描述（例如： # 应用 1：jellyfin（媒体服务器））
+        if [[ "$line" =~ ^[[:space:]]*#[[:space:]]*应用[[:space:]]*[0-9]+：(.+)（(.+)）$ ]]; then
+            name="${BASH_REMATCH[1]}"
+            desc="${BASH_REMATCH[2]}"
+        elif [[ "$line" =~ ^[[:space:]]*#[[:space:]]*应用[[:space:]]*[0-9]+：(.+)$ ]]; then
+            name="${BASH_REMATCH[1]}"
+            desc=""
+        fi
+        
+        # 去除行内注释和行尾空白
+        line=$(echo "$line" | sed 's/#.*//' | sed 's/[[:space:]]*$//')
+        [ -z "$line" ] && continue
+        
+        # 站点块开始（仅在顶层，即不在任何站点块内时）
+        if [ "$in_block" = false ] && [[ "$line" =~ ^[[:space:]]*([^[:space:]{]+)[[:space:]]*\{[[:space:]]*$ ]]; then
+            addr="${BASH_REMATCH[1]}"
+            in_block=true
+            nested=0
+            scheme=""
+            port=""
+            case "$addr" in
+                https://*) scheme="https"; port="443" ;;
+                http://*)  scheme="http";  port="80" ;;
+                :[0-9]*)   port="${addr#:}" ;;
+                *)
+                    if [[ "$addr" =~ ^(.+):([0-9]+)$ ]]; then
+                        port="${BASH_REMATCH[2]}"
+                    fi
+                    ;;
+            esac
+            continue
+        fi
+        
+        if [ "$in_block" = true ]; then
+            # 嵌套块开始（如 reverse_proxy ... {）
+            if [[ "$line" =~ \{[[:space:]]*$ ]]; then
+                nested=$((nested + 1))
+                continue
+            fi
+            
+            # 块结束
+            if [[ "$line" =~ ^[[:space:]]*}[[:space:]]*$ ]]; then
+                if [ "$nested" -gt 0 ]; then
+                    nested=$((nested - 1))
+                else
+                    in_block=false
+                    if [ -n "$port" ]; then
+                        if [ -z "$scheme" ]; then
+                            if [ "$port" = "443" ]; then scheme="https"; else scheme="http"; fi
+                        fi
+                        PROXY_SCHEMES["$port"]="$scheme"
+                        [ -z "$name" ] && name="Caddy服务($port)"
+                        [ -z "$desc" ] && desc="Caddy反向代理服务"
+                        echo "$port|$name|local|$desc|auto|auto|$scheme"
+                    fi
+                    name=""
+                    desc=""
+                fi
+                continue
+            fi
+            
+            # 检测 TLS 配置
+            if [[ "$line" =~ ^[[:space:]]*tls([[:space:]]|$) ]]; then
+                scheme="https"
+                [ -z "$port" ] && port="443"
+            fi
+        fi
+    done < "$file"
+}
+
+# 扫描 Caddy 配置
+scan_caddy() {
+    [ -f /etc/caddy/Caddyfile ] || return 0
+    # 80端口仅为HTTP到HTTPS的跳转，与443是同一服务，仅显示443即可
+    parse_caddyfile /etc/caddy/Caddyfile | grep -v '^80|' || true
+}
+
+# 加载反向代理（Nginx/Caddy）端口协议映射
+load_proxy_schemes() {
+    # Nginx
+    local dir="/etc/nginx/sites-available"
+    if [ -d "$dir" ]; then
+        for f in "$dir"/*; do
+            [ -f "$f" ] || continue
+            grep -q "listen" "$f" || continue
+            local port
+            port=$(grep -E "listen\s+[0-9]+" "$f" | head -1 | awk '{print $2}' | sed 's/;//')
+            [ -n "$port" ] || continue
+            if grep -qE "ssl_certificate|ssl_protocols|ssl[[:space:]]+on|listen[[:space:]]+[0-9]+[[:space:]]+ssl" "$f" 2>/dev/null; then
+                PROXY_SCHEMES["$port"]="https"
+            else
+                PROXY_SCHEMES["$port"]="http"
+            fi
+        done
+    fi
+    
+    # Caddy（仅用于记录端口协议，服务发现由 scan_caddy 完成）
+    if [ -f /etc/caddy/Caddyfile ]; then
+        parse_caddyfile /etc/caddy/Caddyfile > /dev/null
+    fi
+}
+
+# 自动检测服务访问协议（http/https）
+detect_scheme() {
+    local port="$1"
+    
+    # 1. 已知HTTPS端口
+    local https_ports="443 8443 4443 9443"
+    if echo "$https_ports" | grep -qw "$port"; then
+        echo "https"
+        return 0
+    fi
+    
+    # 2. 反向代理配置（Nginx/Caddy）
+    if [ -n "${PROXY_SCHEMES[$port]:-}" ]; then
+        echo "${PROXY_SCHEMES[$port]}"
+        return 0
+    fi
+    
+    # 3. 实际测试HTTPS连通性
+    if command -v curl &>/dev/null; then
+        local code
+        code=$(curl -sk --max-time "$TIMEOUT_SECONDS" -o /dev/null -w "%{http_code}" "https://127.0.0.1:$port" 2>/dev/null || true)
+        code=$(echo "$code" | tail -1)
+        if [ -n "$code" ] && [ "$code" != "000" ]; then
+            echo "https"
+            return 0
+        fi
+    fi
+    
+    echo "http"
 }
 
 # 生成服务卡片HTML
 generate_card() {
     local port="$1" name="$2" access="$3" desc="$4" color="$5" btn_color="$6" status="$7"
+    local scheme="${8:-http}"
     
     # 处理自动颜色
     if [ "$color" = "auto" ] || [ -z "$color" ]; then
@@ -733,18 +911,15 @@ generate_card() {
             ;;
     esac
     
-    # 生成服务URL（HTTPS端口使用https协议）
+    # 生成服务URL（根据实际协议生成访问地址）
     local service_url
-    local https_ports="443 8443 4443 9443"
-    if echo "$https_ports" | grep -qw "$port"; then
-        # HTTPS端口：443端口省略端口号，其他显示端口
-        if [ "$port" -eq 443 ]; then
-            service_url="https://${IP_ADDRESS}"
-        else
-            service_url="https://${IP_ADDRESS}:${port}"
-        fi
+    [ -z "$scheme" ] && scheme="http"
+    if [ "$scheme" = "https" ] && [ "$port" -eq 443 ]; then
+        service_url="https://${IP_ADDRESS}"
+    elif [ "$scheme" = "http" ] && [ "$port" -eq 80 ]; then
+        service_url="http://${IP_ADDRESS}"
     else
-        service_url="http://${IP_ADDRESS}:${port}"
+        service_url="${scheme}://${IP_ADDRESS}:${port}"
     fi
     
     # 处理无端口的服务（如 cron 服务）
@@ -1061,7 +1236,7 @@ HTMLEOF
 main() {
     local start_time
     start_time=$(date +%s)
-    local VERSION="v3.7"
+    local VERSION="v3.8"
     
     echo -e "${BLUE}╔══════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║        服务仪表盘更新脚本 $VERSION         ║${NC}"
@@ -1104,13 +1279,19 @@ main() {
             local toml_services=()
             if parse_toml_config "$CONFIG_FILE" toml_services; then
                 for service in "${toml_services[@]}"; do
-                    local port
+                    local port sname
                     port=$(echo "$service" | cut -d'|' -f1)
+                    sname=$(echo "$service" | cut -d'|' -f2)
+                    # 仅显示实际运行（端口正在监听）的配置服务
+                    if [ "$port" -ne 0 ] && ! check_port "$port"; then
+                        log_info "跳过未运行的配置服务: $sname (端口 $port 未监听)"
+                        continue
+                    fi
                     if [ -z "${seen_ports[$port]:-}" ]; then
                         seen_ports["$port"]=1
                         services+=("$service")
                         config_count=$((config_count + 1))
-                        log_info "配置服务: $(echo "$service" | cut -d'|' -f2) (端口 $port)"
+                        log_info "配置服务: $sname (端口 $port)"
                     fi
                 done
                 log_info "从TOML配置文件加载了 $config_count 个服务"
@@ -1127,6 +1308,11 @@ main() {
                     if [[ "$line" =~ ^[0-9]+\| ]]; then
                         local port
                         port=$(echo "$line" | cut -d'|' -f1)
+                        # 仅显示实际运行（端口正在监听）的配置服务
+                        if [ "$port" -ne 0 ] && ! check_port "$port"; then
+                            log_info "跳过未运行的配置服务 (端口 $port 未监听)"
+                            continue
+                        fi
                         if [ -z "${seen_ports[$port]:-}" ]; then
                             seen_ports["$port"]=1
                             local parsed_line
@@ -1178,22 +1364,52 @@ main() {
         done <<< "$(scan_nginx)"
     fi
     
+    # 第四步：扫描Caddy配置（补充发现）
+    if [ "${SCAN_CADDY:-true}" = "true" ]; then
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            local port
+            port=$(echo "$line" | cut -d'|' -f1)
+            if [ -z "${seen_ports[$port]:-}" ]; then
+                seen_ports["$port"]=1
+                services+=("$line")
+                log_info "Caddy发现: $(echo "$line" | cut -d'|' -f2) (端口 $port)"
+            fi
+        done < <(scan_caddy)
+    fi
+    
     # 如果没有发现任何服务
     if [ ${#services[@]} -eq 0 ]; then
         log_warn "未发现任何服务"
         echo -e "${YELLOW}警告: 未发现任何运行中的服务${NC}"
         echo -e "请检查是否有服务正在运行，或手动编辑配置文件${NC}"
-        services+=("80|无服务|local|未发现运行中的服务|auto|auto")
+        services+=("80|无服务|local|未发现运行中的服务|auto|auto|auto")
     fi
     
     # 添加 cron 服务监控（公众号监控）
     local gzh_log="/root/gzh/monitor.log"
     if [ -f "$gzh_log" ]; then
-        services+=("0|公众号监控|local|微信公众号监控服务，每2小时检查新文章|auto|auto")
+        services+=("0|公众号监控|local|微信公众号监控服务，每2小时检查新文章|auto|auto|auto")
         log_info "添加公众号监控服务"
     fi
     
     log_info "共找到 ${#services[@]} 个服务"
+    
+    # 加载反向代理配置并解析每个服务的访问协议（http/https）
+    log_info "解析服务访问协议..."
+    load_proxy_schemes
+    local -A scheme_map
+    for service in "${services[@]}"; do
+        local port scheme
+        port=$(echo "$service" | cut -d'|' -f1)
+        scheme=$(echo "$service" | cut -d'|' -f7)
+        [ -z "$scheme" ] && scheme="auto"
+        if [ "$scheme" = "auto" ]; then
+            scheme=$(detect_scheme "$port")
+        fi
+        scheme_map["$port"]="$scheme"
+        log_info "  $(echo "$service" | cut -d'|' -f2) (端口 $port): $scheme"
+    done
     
     # 健康检查
     log_info "执行健康检查..."
@@ -1201,9 +1417,10 @@ main() {
     local healthy=0 unhealthy=0 stopped=0
     
     for service in "${services[@]}"; do
-        local port name
+        local port name scheme
         port=$(echo "$service" | cut -d'|' -f1)
         name=$(echo "$service" | cut -d'|' -f2)
+        scheme="${scheme_map[$port]:-http}"
         
         # 特殊处理 cron 服务（端口0表示非网络服务）
         if [ "$port" -eq 0 ]; then
@@ -1218,7 +1435,7 @@ main() {
                 ((stopped++)) || true
             fi
         elif check_port "$port"; then
-            if check_http "$port"; then
+            if check_http "$port" "$scheme"; then
                 status_map["$port"]="healthy"
                 log_info "  ✓ $name (端口 $port): 健康"
                 ((healthy++)) || true
@@ -1247,10 +1464,10 @@ main() {
     # 生成服务卡片
     local cards=""
     for service in "${services[@]}"; do
-        local port name access desc color btn_color
-        IFS='|' read -r port name access desc color btn_color <<< "$service"
+        local port name access desc color btn_color scheme
+        IFS='|' read -r port name access desc color btn_color scheme <<< "$service"
         local status="${status_map[$port]:-unknown}"
-        cards+="$(generate_card "$port" "$name" "$access" "$desc" "$color" "$btn_color" "$status")"
+        cards+="$(generate_card "$port" "$name" "$access" "$desc" "$color" "$btn_color" "$status" "${scheme_map[$port]:-http}")"
     done
     
     # 生成完整HTML

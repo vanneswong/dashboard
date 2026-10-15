@@ -14,6 +14,8 @@ port = 10000
 name = "服务仪表盘"
 desc = "服务监控面板"
 access = "local"           # 访问权限: global(公网) 或 local(局域网)
+scheme = "https"           # 访问协议: auto(自动检测，默认) / http / https
+# 也可以使用 https = true 强制使用 HTTPS，或 https = false 强制使用 HTTP
 
 # Photo Buddy
 [[services]]

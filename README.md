@@ -11,6 +11,8 @@
 ## 功能特性
 
 - 🔍 **自动服务发现** - 无需手动配置，自动扫描本机运行的服务
+- 🔀 **反向代理支持** - 自动识别 Nginx / Caddy 反代服务及其 HTTP/HTTPS 协议
+- 🔒 **HTTPS 识别** - 自动检测服务访问协议，正确生成 https:// 访问地址
 - 💓 **健康检查** - 自动检测服务运行状态（端口监听 + HTTP检查）
 - 🎨 **美观界面** - 现代化响应式设计，支持移动端
 - 📊 **统计面板** - 实时显示服务总数、健康率等统计信息
@@ -161,12 +163,13 @@ desc = "服务监控面板"
 access = "local"           # 访问权限: global(公网) 或 local(局域网)
 color = "auto"             # 卡片颜色: auto 或 CSS渐变/十六进制颜色
 btn_color = "auto"         # 按钮颜色: auto 或 十六进制颜色
+scheme = "https"           # 访问协议: auto(自动检测，默认) / http / https
 ```
 
 #### 2. 旧格式（兼容）
 
 ```
-端口|服务名称|访问权限|描述|卡片颜色|按钮颜色
+端口|服务名称|访问权限|描述|卡片颜色|按钮颜色|协议(可选)
 ```
 
 | 字段 | 说明 | 示例 |
@@ -177,6 +180,7 @@ btn_color = "auto"         # 按钮颜色: auto 或 十六进制颜色
 | 描述 | 服务的详细描述 | 公司官方网站 |
 | 卡片颜色 | CSS渐变、十六进制颜色值或`auto` | auto |
 | 按钮颜色 | 按钮的背景颜色或`auto` | auto |
+| 协议 | 访问协议 `auto`/`http`/`https`（可省略） | auto |
 
 ### 配置字段说明
 
@@ -188,6 +192,7 @@ btn_color = "auto"         # 按钮颜色: auto 或 十六进制颜色
 | `access` | 访问权限 | `global`(公网) 或 `local`(局域网) | 自动检测 |
 | `color` | 卡片颜色 | CSS渐变、十六进制颜色值或`auto` | `auto` |
 | `btn_color` | 按钮颜色 | 十六进制颜色值或`auto` | `auto` |
+| `scheme` | 访问协议 | `auto`(自动检测，默认) / `http` / `https` | `auto` |
 
 ### 自动颜色模式
 
@@ -195,6 +200,11 @@ btn_color = "auto"         # 按钮颜色: auto 或 十六进制颜色
 - **健康服务**: 绿色渐变 `linear-gradient(90deg, #27ae60, #2ecc71)`
 - **停止服务**: 深蓝色 `linear-gradient(90deg, #34495e, #2c3e50)`
 - **异常服务**: 橙色渐变 `linear-gradient(90deg, #e67e22, #d35400)`
+
+### 未运行服务过滤
+
+配置文件中的服务只有在**实际运行**（端口正在监听）时才会显示在仪表盘上。
+如果配置了某个服务，但服务器上并未运行该服务，脚本会自动跳过，不再显示为“未运行”卡片。
 
 ### 环境变量
 
@@ -206,6 +216,7 @@ btn_color = "auto"         # 按钮颜色: auto 或 十六进制颜色
 | `DASHBOARD_IP` | 服务器IP地址 | 自动检测 |
 | `DASHBOARD_TIMEOUT` | HTTP检查超时时间（秒） | 3 |
 | `SCAN_NGINX` | 是否扫描Nginx配置 | true |
+| `SCAN_CADDY` | 是否扫描Caddy配置 | true |
 | `EXCLUDE_PORTS` | 排除的端口列表（空格分隔） | `22000` |
 | `COLOR_HEALTHY` | 健康服务颜色 | `linear-gradient(90deg, #27ae60, #2ecc71)\|#27ae60` |
 | `COLOR_STOPPED` | 停止服务颜色 | `linear-gradient(90deg, #34495e, #2c3e50)\|#34495e` |
@@ -284,6 +295,7 @@ tail -f /var/log/dashboard_update.log
 
 ## 版本历史
 
+- **v3.8** - 新增Caddy反向代理支持、HTTPS协议自动识别、过滤未运行服务
 - **v3.7** - 支持自动查找配置文件，优先TOML格式
 - **v3.6** - 支持TOML格式配置，更加易读和维护
 - **v3.5** - 支持排除端口配置，默认排除Syncthing传输端口22000

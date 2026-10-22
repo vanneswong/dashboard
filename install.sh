@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================================
-# 服务仪表盘安装脚本 v3.3
+# 服务仪表盘安装脚本 v3.9
 # ============================================================================
 
 set -euo pipefail
@@ -16,7 +16,7 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo -e "${BLUE}╔══════════════════════════════════════════╗${NC}"
-echo -e "${BLUE}║        服务仪表盘安装程序 v3.3          ║${NC}"
+echo -e "${BLUE}║        服务仪表盘安装程序 v3.9          ║${NC}"
 echo -e "${BLUE}╚══════════════════════════════════════════╝${NC}"
 echo ""
 
@@ -149,6 +149,57 @@ echo ""
 echo -e "${BLUE}[5/7]${NC} 设置文件权限..."
 chmod +x "$SCRIPT_DIR/update_dashboard.sh"
 chmod 644 "$SCRIPT_DIR/conf/services.conf" 2>/dev/null || true
+
+echo -e "  ${CYAN}配置防火墙状态只读权限（供定时任务读取实际访问权限）...${NC}"
+DASHBOARD_RUN_USER="${SUDO_USER:-}"
+if [ -n "$DASHBOARD_RUN_USER" ] && [ "$DASHBOARD_RUN_USER" != "root" ]; then
+    SUDOERS_FILE="/etc/sudoers.d/dashboard-firewall"
+    FW_CMDS=()
+
+    # 只授权仪表盘实际使用的只读查询命令
+    fw_bin() {
+        local name="$1" p
+        for p in "/usr/sbin/$name" "/sbin/$name" "/usr/bin/$name" "/bin/$name"; do
+            [ -x "$p" ] && { echo "$p"; return 0; }
+        done
+        return 1
+    }
+
+    UFW_BIN=$(fw_bin ufw || true)
+    FIREWALLD_BIN=$(fw_bin firewall-cmd || true)
+    IPTABLES_BIN=$(fw_bin iptables || true)
+    NFT_BIN=$(fw_bin nft || true)
+
+    [ -n "$UFW_BIN" ] && FW_CMDS+=("$UFW_BIN status" "$UFW_BIN status verbose")
+    [ -n "$FIREWALLD_BIN" ] && FW_CMDS+=("$FIREWALLD_BIN --state" "$FIREWALLD_BIN --get-default-zone" "$FIREWALLD_BIN --zone=* --list-all")
+    [ -n "$IPTABLES_BIN" ] && FW_CMDS+=("$IPTABLES_BIN -S")
+    [ -n "$NFT_BIN" ] && FW_CMDS+=("$NFT_BIN list ruleset")
+
+    if [ ${#FW_CMDS[@]} -gt 0 ]; then
+        {
+            echo "# 服务仪表盘：允许定时任务只读查询防火墙状态"
+            echo "# 由 install.sh 自动生成，请勿手动修改"
+            printf '%s ALL=(root) NOPASSWD: ' "$DASHBOARD_RUN_USER"
+            printf '%s' "${FW_CMDS[0]}"
+            for ((i = 1; i < ${#FW_CMDS[@]}; i++)); do
+                printf ', %s' "${FW_CMDS[$i]}"
+            done
+            echo
+        } > "$SUDOERS_FILE"
+        chmod 440 "$SUDOERS_FILE"
+
+        if ! visudo -cf "$SUDOERS_FILE" >/dev/null 2>&1; then
+            rm -f "$SUDOERS_FILE"
+            echo -e "${YELLOW}  ⚠ 防火墙 sudoers 规则校验失败，已跳过（访问权限可能显示为未知）${NC}"
+        else
+            echo -e "${GREEN}  ✓ 已允许用户 $DASHBOARD_RUN_USER 读取防火墙状态${NC}"
+        fi
+    else
+        echo -e "${YELLOW}  ⚠ 未找到可用的防火墙工具，跳过${NC}"
+    fi
+else
+    echo -e "${GREEN}  ✓ 以 root 运行，无需额外配置${NC}"
+fi
 echo -e "${GREEN}  ✓ 权限设置完成${NC}"
 
 # ============================================================================
@@ -241,6 +292,16 @@ if [ -x "$SCRIPT_DIR/update_dashboard.sh" ]; then
     "$SCRIPT_DIR/update_dashboard.sh" 2>&1 | tail -15
 else
     echo -e "${YELLOW}  跳过页面生成，请手动运行: $SCRIPT_DIR/update_dashboard.sh${NC}"
+fi
+
+# 让运行定时任务的普通用户能够更新仪表盘和日志
+DASHBOARD_RUN_USER="${SUDO_USER:-}"
+if [ -n "$DASHBOARD_RUN_USER" ] && [ "$DASHBOARD_RUN_USER" != "root" ]; then
+    chown -R "$DASHBOARD_RUN_USER":"$DASHBOARD_RUN_USER" /var/www/dashboard 2>/dev/null || true
+    if [ -f "${DASHBOARD_LOG:-/var/log/dashboard_update.log}" ]; then
+        chown "$DASHBOARD_RUN_USER":"$DASHBOARD_RUN_USER" "${DASHBOARD_LOG:-/var/log/dashboard_update.log}" 2>/dev/null || true
+    fi
+    echo -e "${GREEN}  ✓ 已设置 $DASHBOARD_RUN_USER 对仪表盘目录和日志的写权限${NC}"
 fi
 
 # ============================================================================

@@ -22,12 +22,12 @@ exclude_ports = [22000]
 # desc = "公司官网，提供产品展示和联系方式"
 
 # 示例2: 完整配置
-# 可以手动指定访问权限和颜色
+# 可以手动指定卡片颜色（访问权限始终以实际防火墙规则为准）
 # [[services]]
 # port = 443
 # name = "服务仪表盘"
 # desc = "服务监控面板，展示本机部署的所有服务"
-# access = "local"           # 访问权限: global(公网) 或 local(局域网)，不填则自动检测
+# access = "local"           # 已废弃：访问权限以实际防火墙规则为准，此字段仅兼容旧配置
 # color = "auto"             # 卡片颜色: auto 或 CSS渐变/十六进制颜色
 # btn_color = "auto"         # 按钮颜色: auto 或 十六进制颜色
 # scheme = "https"           # 访问协议: auto(自动检测，默认) / http / https
@@ -76,7 +76,6 @@ exclude_ports = [22000]
 # port = 3306
 # name = "MySQL"
 # desc = "MySQL数据库服务"
-# access = "local"
 
 # 网页终端
 # [[services]]

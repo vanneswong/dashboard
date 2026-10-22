@@ -1,12 +1,12 @@
 #!/bin/bash
 # ============================================================================
-# 服务仪表盘更新脚本 v3.8
+# 服务仪表盘更新脚本 v3.9
 # 通用版本 - 适用于各类Linux服务器
 # ============================================================================
 # 功能：自动发现服务、健康检查、生成Web仪表盘
 # 作者：MiMo
-# 版本：v3.8
-# 更新：支持简化配置格式（端口|标题|简介），自动检测访问权限
+# 版本：v3.9
+# 更新：访问权限改为按实际防火墙规则（UFW/firewalld/iptables/nftables）显示
 #      支持Caddy反向代理发现、HTTPS协议自动识别、过滤未运行服务
 # ============================================================================
 
@@ -434,49 +434,539 @@ get_service_desc() {
     echo "运行在端口 $port 的服务 - $name"
 }
 
-# 自动检测端口访问权限
-detect_access_type() {
+# ============================================================================
+# 防火墙访问权限检测（以实际防火墙规则为准）
+# ============================================================================
+# 说明：卡片上的“访问权限”来自实际生效的防火墙规则，配置文件的 access
+#       字段不再作为判断依据（仅保留字段兼容）。
+# 支持：UFW / firewalld / iptables / nftables
+# 返回值：global（公网可访问）/ local（仅内网可访问）/ unknown（无法读取规则）
+
+FW_INITIALIZED=0
+FW_BACKEND="none"            # ufw | firewalld | iptables | nftables | none | unknown
+FW_DEFAULT_PUBLIC=0          # 防火墙默认是否放行入站
+FW_ERROR=""
+declare -A FW_PUBLIC_PORTS=() # 允许从公网访问的端口
+declare -A FW_LOCAL_PORTS=()  # 仅允许内网访问的端口
+declare -A FW_DENY_PUBLIC=()  # 从公网明确拒绝的端口
+declare -A FW_APP_PORTS=()    # UFW 应用配置名 -> 端口
+FW_PUBLIC_RANGES=()
+FW_LOCAL_RANGES=()
+
+# 在需要时以 root 或免密 sudo 执行只读命令
+run_priv() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@" 2>/dev/null
+    elif command -v sudo &>/dev/null && sudo -n "$@" 2>/dev/null; then
+        return 0
+    else
+        "$@" 2>/dev/null
+    fi
+}
+
+find_bin() {
+    local name="$1"
+    local p
+    for p in "/usr/sbin/$name" "/sbin/$name" "/usr/bin/$name" "/bin/$name"; do
+        if [ -x "$p" ]; then
+            echo "$p"
+            return 0
+        fi
+    done
+    command -v "$name" 2>/dev/null || true
+}
+
+# 来源地址是否仅限内网（Anywhere 视为公网）
+is_private_source() {
+    local src="$1"
+    src="${src% (v6)}"
+    src="${src%% *}"
+    src="${src#[}"
+    src="${src%]}"
+    local addr="${src%/*}"
+
+    case "$addr" in
+        ""|any|Anywhere|0.0.0.0|0.0.0.0/0|::|::/0) return 1 ;;
+        10.*|127.*|169.254.*|192.168.*) return 0 ;;
+        172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;;
+        ::1|fe80:*|fc*|fd*) return 0 ;;
+        ::ffff:10.*|::ffff:127.*|::ffff:192.168.*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+mark_fw_port() {
     local port="$1"
-    local access="local"
-    
-    # 检查UFW防火墙规则
-    if command -v ufw &>/dev/null; then
-        local ufw_status
-        ufw_status=$(ufw status 2>/dev/null)
-        
-        # 检查UFW是否启用
-        if echo "$ufw_status" | grep -q "Status: active"; then
-            # 检查是否有允许Anywhere的规则
-            if echo "$ufw_status" | grep -qE "${port}.*ALLOW.*Anywhere"; then
-                access="global"
+    local public="$2"
+    if [ "$public" = "1" ]; then
+        FW_PUBLIC_PORTS["$port"]=1
+    else
+        FW_LOCAL_PORTS["$port"]=1
+    fi
+}
+
+# 记录“从公网明确拒绝”的端口（用于默认放行策略下的 DROP/REJECT 规则）
+mark_fw_deny() {
+    local port="$1"
+    case "$port" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    FW_DENY_PUBLIC["$port"]=1
+}
+
+add_fw_deny_ports() {
+    local spec="$1"
+    spec="${spec//,/ }"
+    spec="${spec//|/ }"
+
+    local item start end p
+    for item in $spec; do
+        item="${item% (v6)}"
+        item="${item%%/*}"
+        item="${item#[}"
+        item="${item%]}"
+        [ -z "$item" ] && continue
+
+        if [[ "$item" =~ ^([0-9]+):([0-9]+)$ ]]; then
+            start="${BASH_REMATCH[1]}"
+            end="${BASH_REMATCH[2]}"
+            if [ $((end - start)) -le 2048 ]; then
+                for ((p = start; p <= end; p++)); do
+                    mark_fw_deny "$p"
+                done
             fi
         else
-            # UFW未启用，检查iptables
-            if command -v iptables &>/dev/null; then
-                local policy
-                policy=$(iptables -L INPUT -n 2>/dev/null | head -1 | grep -oP 'policy \K\w+')
-                if [ "$policy" = "ACCEPT" ]; then
-                    # 默认策略是ACCEPT，没有明确规则则为global
-                    access="global"
-                fi
+            mark_fw_deny "$item"
+        fi
+    done
+}
+
+# 添加端口规则，支持 80 / 80,443 / 1000:2000 / 443/tcp
+add_fw_ports() {
+    local spec="$1"
+    local public="$2"
+    spec="${spec//,/ }"
+    spec="${spec//|/ }"
+
+    local item start end p
+    for item in $spec; do
+        item="${item% (v6)}"
+        item="${item%%/*}"
+        item="${item#[}"
+        item="${item%]}"
+        [ -z "$item" ] && continue
+
+        if [[ "$item" =~ ^([0-9]+):([0-9]+)$ ]]; then
+            start="${BASH_REMATCH[1]}"
+            end="${BASH_REMATCH[2]}"
+            # 小范围直接展开，超大范围单独记录
+            if [ $((end - start)) -le 2048 ]; then
+                for ((p = start; p <= end; p++)); do
+                    mark_fw_port "$p" "$public"
+                done
+            elif [ "$public" = "1" ]; then
+                FW_PUBLIC_RANGES+=("${start}:${end}")
             else
-                # 无法确定，默认为global（无防火墙）
-                access="global"
+                FW_LOCAL_RANGES+=("${start}:${end}")
+            fi
+        elif [[ "$item" =~ ^[0-9]+$ ]]; then
+            mark_fw_port "$item" "$public"
+        fi
+    done
+}
+
+fw_port_in_ranges() {
+    local port="$1"
+    shift
+    [ "$#" -gt 0 ] || return 1
+    local range start end
+    for range in "$@"; do
+        start="${range%%:*}"
+        end="${range##*:}"
+        if [ "$port" -ge "$start" ] && [ "$port" -le "$end" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# 加载 UFW 应用配置（如 Nginx Full -> 80,443/tcp）
+load_ufw_app_ports() {
+    local dir="/etc/ufw/applications.d"
+    [ -d "$dir" ] || return 0
+
+    local line app=""
+    while IFS= read -r line; do
+        line="${line%$'\r'}"
+        case "$line" in
+            \[*\])
+                app="${line:1:${#line}-2}"
+                ;;
+            ports=*)
+                [ -n "$app" ] && FW_APP_PORTS["$app"]="${line#ports=}"
+                ;;
+        esac
+    done < <(cat "$dir"/* 2>/dev/null || true)
+}
+
+# 将 UFW 的 To 列转换为端口表达式
+ufw_to_spec() {
+    local to="$1"
+    # `ufw status verbose` 会显示为 "80,443/tcp (Nginx Full)"，去掉尾部说明
+    to=$(printf '%s' "$to" | sed -E 's/[[:space:]]+\(.*\)[[:space:]]*$//')
+    to="${to% (v6)}"
+
+    if [[ "$to" =~ ^[0-9]+(/[a-z]+)?$ ]] || \
+       [[ "$to" =~ ^[0-9]+:[0-9]+(/[a-z]+)?$ ]] || \
+       [[ "$to" =~ ^[0-9]+(,[0-9]+)+(/[a-z]+)?$ ]]; then
+        echo "$to"
+        return 0
+    fi
+
+    if [ -n "${FW_APP_PORTS[$to]:-}" ]; then
+        echo "${FW_APP_PORTS[$to]}"
+        return 0
+    fi
+    return 1
+}
+
+# 解析 `ufw status verbose`
+parse_ufw_status() {
+    local status="$1"
+    load_ufw_app_ports
+
+    local default_in
+    default_in=$(printf '%s\n' "$status" | sed -n 's/^Default:[[:space:]]*\([a-z]*\)[[:space:]]*(incoming).*/\1/p' | head -1)
+    # UFW 默认入站策略通常是 deny；只有明确 allow 时才视为默认放行
+    [ "$default_in" = "allow" ] && FW_DEFAULT_PUBLIC=1
+
+    local line normalized to action from spec
+    while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        case "$line" in
+            Status:*|Logging:*|Default:*|New\ profiles:*|To\ *|--\ *) continue ;;
+        esac
+
+        # UFW 用两个以上空格对齐各列；"Anywhere (v6)" 中间只有一个空格
+        normalized=$(printf '%s' "$line" | sed -E 's/[[:space:]]{2,}/\t/g')
+        to=$(printf '%s' "$normalized" | cut -f1)
+        action=$(printf '%s' "$normalized" | cut -f2)
+        from=$(printf '%s' "$normalized" | cut -f3-)
+        [ -z "$to" ] || [ -z "$action" ] || [ -z "$from" ] && continue
+
+        spec=$(ufw_to_spec "$to" 2>/dev/null || true)
+        [ -z "$spec" ] && continue
+
+        case "$action" in
+            ALLOW*|allow*|LIMIT*|limit*)
+                if is_private_source "$from"; then
+                    add_fw_ports "$spec" 0
+                else
+                    add_fw_ports "$spec" 1
+                fi
+                ;;
+            DENY*|deny*|REJECT*|reject*)
+                if ! is_private_source "$from"; then
+                    add_fw_deny_ports "$spec"
+                fi
+                ;;
+        esac
+    done <<< "$status"
+}
+
+# 解析 iptables -S（含 UFW 未启用时的普通规则）
+parse_iptables_rules() {
+    local rules="$1"
+    local line spec src target
+
+    while IFS= read -r line; do
+        case "$line" in
+            "-P INPUT DROP"|"-P INPUT REJECT") FW_DEFAULT_PUBLIC=0; continue ;;
+            "-P INPUT ACCEPT") FW_DEFAULT_PUBLIC=1; continue ;;
+            "-A "*) ;;
+            *) continue ;;
+        esac
+
+        target=""
+        if [[ "$line" =~ -j[[:space:]]+(ACCEPT|DROP|REJECT) ]]; then
+            target="${BASH_REMATCH[1]}"
+        else
+            continue
+        fi
+
+        spec=""
+        if [[ "$line" =~ --dports?[[:space:]]+([^[:space:]]+) ]]; then
+            spec="${BASH_REMATCH[1]}"
+        fi
+
+        src=""
+        if [[ "$line" =~ (^|[[:space:]])-s[[:space:]]+([^[:space:]]+) ]]; then
+            src="${BASH_REMATCH[2]}"
+        fi
+
+        if [ -z "$spec" ]; then
+            # 无端口限制的规则：INPUT 链且不限来源时影响默认策略
+            if [[ "$line" == "-A INPUT "* ]] && [ -z "$src" ]; then
+                if [ "$target" = "ACCEPT" ]; then
+                    FW_DEFAULT_PUBLIC=1
+                else
+                    FW_DEFAULT_PUBLIC=0
+                fi
+            fi
+            continue
+        fi
+
+        if [ "$target" = "ACCEPT" ]; then
+            if [ -n "$src" ] && is_private_source "$src"; then
+                add_fw_ports "$spec" 0
+            else
+                add_fw_ports "$spec" 1
+            fi
+        else
+            # DROP/REJECT：仅记录来自公网的拒绝
+            if [ -z "$src" ] || ! is_private_source "$src"; then
+                add_fw_deny_ports "$spec"
             fi
         fi
-    elif command -v iptables &>/dev/null; then
-        # 没有UFW，检查iptables
-        local policy
-        policy=$(iptables -L INPUT -n 2>/dev/null | head -1 | grep -oP 'policy \K\w+')
-        if [ "$policy" = "ACCEPT" ]; then
-            access="global"
+    done <<< "$rules"
+}
+
+# 解析 nft list ruleset（作为 iptables 不可用时的后备）
+parse_nft_ruleset() {
+    local rules="$1"
+    local chain="" line rest spec src target
+
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^[[:space:]]*chain[[:space:]]+([^[:space:]]+) ]]; then
+            chain="${BASH_REMATCH[1]}"
+            continue
         fi
-    else
-        # 无防火墙工具，默认为global
-        access="global"
+
+        case "$chain" in
+            input|ufw-user-input) ;;
+            *) continue ;;
+        esac
+
+        # 去掉行首空白
+        line="${line#"${line%%[![:space:]]*}"}"
+        if [[ "$line" == *"policy accept"* ]]; then
+            [ "$chain" = "input" ] && FW_DEFAULT_PUBLIC=1
+            continue
+        fi
+        if [[ "$line" == *"policy drop"* ]] || [[ "$line" == *"policy reject"* ]]; then
+            [ "$chain" = "input" ] && FW_DEFAULT_PUBLIC=0
+            continue
+        fi
+
+        case "$line" in
+            *accept*) target="ACCEPT" ;;
+            *reject*) target="REJECT" ;;
+            *drop*) target="DROP" ;;
+            *) continue ;;
+        esac
+
+        spec=""
+        if [[ "$line" == *dport* ]]; then
+            rest="${line#*dport}"
+            rest="${rest%%counter*}"
+            rest="${rest%%accept*}"
+            rest="${rest%%reject*}"
+            rest="${rest%%drop*}"
+            spec=$(printf '%s' "$rest" | grep -oE '[0-9]+([-:][0-9]+)?' | sed 's/-/:/g' | tr '\n' ' ')
+        fi
+
+        src=""
+        if [[ "$line" =~ saddr[[:space:]]+([^[:space:]]+) ]]; then
+            src="${BASH_REMATCH[1]}"
+        fi
+
+        if [ -z "$spec" ]; then
+            # 无端口限制的规则：仅无限定来源的 input 链规则影响默认策略
+            if [ "$chain" = "input" ] && [ -z "$src" ]; then
+                if [ "$target" = "ACCEPT" ]; then
+                    FW_DEFAULT_PUBLIC=1
+                else
+                    FW_DEFAULT_PUBLIC=0
+                fi
+            fi
+            continue
+        fi
+
+        if [ "$target" = "ACCEPT" ]; then
+            if [ -n "$src" ] && is_private_source "$src"; then
+                add_fw_ports "$spec" 0
+            else
+                add_fw_ports "$spec" 1
+            fi
+        else
+            if [ -z "$src" ] || ! is_private_source "$src"; then
+                add_fw_deny_ports "$spec"
+            fi
+        fi
+    done <<< "$rules"
+}
+
+# firewalld 服务名 -> 端口
+get_firewalld_service_ports() {
+    local name="$1"
+    local f
+    for f in "/usr/lib/firewalld/services/$name.xml" "/etc/firewalld/services/$name.xml"; do
+        if [ -f "$f" ]; then
+            grep -oE 'port="[0-9]+(-[0-9]+)?"' "$f" | sed -E 's/port="([^"]+)"/\1/' | tr '\n' ' '
+            return 0
+        fi
+    done
+    # 常见服务兜底
+    case "$name" in
+        http) echo "80" ;;
+        https) echo "443" ;;
+        ssh) echo "22" ;;
+        samba) echo "137 138 139 445" ;;
+    esac
+}
+
+parse_firewalld_zone() {
+    local zone="$1"
+    local list
+    list=$(run_priv "$FIREWALL_CMD" --zone="$zone" --list-all 2>/dev/null || true)
+    [ -z "$list" ] && return 1
+
+    local target
+    target=$(printf '%s\n' "$list" | sed -n 's/^[[:space:]]*target:[[:space:]]*//p' | head -1)
+    [ "$target" = "ACCEPT" ] && FW_DEFAULT_PUBLIC=1
+
+    local ports services spec svc svc_ports
+    ports=$(printf '%s\n' "$list" | sed -n 's/^[[:space:]]*ports:[[:space:]]*//p' | head -1)
+    [ -n "$ports" ] && add_fw_ports "$ports" 1
+
+    services=$(printf '%s\n' "$list" | sed -n 's/^[[:space:]]*services:[[:space:]]*//p' | head -1)
+    for svc in $services; do
+        svc_ports=$(get_firewalld_service_ports "$svc")
+        [ -n "$svc_ports" ] && add_fw_ports "$svc_ports" 1
+    done
+    return 0
+}
+
+# 初始化防火墙信息（每次运行只执行一次）
+fw_init() {
+    [ "$FW_INITIALIZED" = "1" ] && return 0
+    FW_INITIALIZED=1
+
+    local ufw_bin iptables_bin nft_bin
+    ufw_bin=$(find_bin ufw)
+    iptables_bin=$(find_bin iptables)
+    nft_bin=$(find_bin nft)
+    FIREWALL_CMD=$(find_bin firewall-cmd)
+
+    # 1. UFW
+    if [ -n "$ufw_bin" ]; then
+        local ufw_status=""
+        ufw_status=$(run_priv "$ufw_bin" status verbose 2>/dev/null || true)
+        if printf '%s\n' "$ufw_status" | grep -q '^Status: active'; then
+            FW_BACKEND="ufw"
+            parse_ufw_status "$ufw_status"
+            return 0
+        fi
+
+        # UFW 已启用但普通用户读不到规则：不要误判为“无防火墙”
+        if [ -z "$ufw_status" ] && [ -f /etc/ufw/ufw.conf ] && \
+           grep -qE '^[[:space:]]*ENABLED[[:space:]]*=[[:space:]]*yes' /etc/ufw/ufw.conf 2>/dev/null; then
+            FW_BACKEND="unknown"
+            FW_ERROR="UFW 已启用，但当前用户无权读取规则（请使用 root 运行，或配置免密 sudo）"
+            return 0
+        fi
     fi
-    
-    echo "$access"
+
+    # 2. firewalld
+    if [ -n "$FIREWALL_CMD" ]; then
+        local fw_state
+        fw_state=$(run_priv "$FIREWALL_CMD" --state 2>/dev/null || true)
+        if [ "$fw_state" = "running" ]; then
+            local zone
+            zone=$(run_priv "$FIREWALL_CMD" --get-default-zone 2>/dev/null || true)
+            [ -z "$zone" ] && zone="public"
+            if parse_firewalld_zone "$zone"; then
+                FW_BACKEND="firewalld"
+                return 0
+            fi
+            FW_BACKEND="unknown"
+            FW_ERROR="firewalld 正在运行，但当前用户无权读取规则"
+            return 0
+        fi
+    fi
+
+    # 3. iptables
+    if [ -n "$iptables_bin" ]; then
+        local ipt_rules
+        ipt_rules=$(run_priv "$iptables_bin" -S 2>/dev/null || true)
+        if [ -n "$ipt_rules" ]; then
+            FW_BACKEND="iptables"
+            parse_iptables_rules "$ipt_rules"
+            return 0
+        fi
+    fi
+
+    # 4. nftables
+    if [ -n "$nft_bin" ]; then
+        local nft_rules
+        nft_rules=$(run_priv "$nft_bin" list ruleset 2>/dev/null || true)
+        if [ -n "$nft_rules" ]; then
+            FW_BACKEND="nftables"
+            parse_nft_ruleset "$nft_rules"
+            return 0
+        fi
+    fi
+
+    # 5. 没有可用的只读权限：若系统存在防火墙工具，保守标记为未知
+    if [ -n "$ufw_bin" ] || [ -n "$FIREWALL_CMD" ] || [ -n "$iptables_bin" ]; then
+        FW_BACKEND="unknown"
+        FW_ERROR="检测到防火墙工具，但当前用户无权读取规则"
+        return 0
+    fi
+
+    # 6. 确实没有任何防火墙
+    FW_BACKEND="none"
+    return 0
+}
+
+# 自动检测端口访问权限（以实际防火墙规则为准）
+detect_access_type() {
+    local port="$1"
+
+    # 非网络服务（如 cron 监控）没有对应端口
+    [ "$port" = "0" ] && { echo "local"; return 0; }
+
+    fw_init
+
+    case "$FW_BACKEND" in
+        unknown)
+            echo "unknown"
+            return 0
+            ;;
+        none)
+            echo "global"
+            return 0
+            ;;
+    esac
+
+    if [ -n "${FW_PUBLIC_PORTS[$port]:-}" ]; then
+        echo "global"
+        return 0
+    fi
+
+    if [ "${#FW_PUBLIC_RANGES[@]}" -gt 0 ] && \
+       fw_port_in_ranges "$port" "${FW_PUBLIC_RANGES[@]}"; then
+        echo "global"
+        return 0
+    fi
+
+    # 默认放行且没有针对性拒绝
+    if [ "$FW_DEFAULT_PUBLIC" = "1" ] && [ -z "${FW_DENY_PUBLIC[$port]:-}" ]; then
+        echo "global"
+        return 0
+    fi
+
+    echo "local"
 }
 
 # 解析TOML格式的配置文件
@@ -530,8 +1020,21 @@ parse_toml_config() {
                 local key="${BASH_REMATCH[1]}"
                 local value="${BASH_REMATCH[2]}"
                 
-                # 移除引号
-                value=$(echo "$value" | sed 's/^["\x27]\|["\x27]$//g')
+                # 去除首尾空白
+                value="${value#"${value%%[![:space:]]*}"}"
+                value="${value%"${value##*[![:space:]]}"}"
+
+                # 去掉引号和行内注释（TOML 支持 `key = "value" # 注释`）
+                if [[ "$value" == \"* ]]; then
+                    value="${value#\"}"
+                    value="${value%%\"*}"
+                elif [[ "$value" == \'* ]]; then
+                    value="${value#\'}"
+                    value="${value%%\'*}"
+                else
+                    value="${value%%#*}"
+                    value="${value%"${value##*[![:space:]]}"}"
+                fi
                 
                 case "$key" in
                     port)
@@ -883,13 +1386,20 @@ generate_card() {
     [ -z "$btn_color" ] && btn_color="#667eea"
     
     local access_text access_class
-    if [ "$access" = "global" ]; then
-        access_text="公网"
-        access_class="access-global"
-    else
-        access_text="局域网"
-        access_class="access-local"
-    fi
+    case "$access" in
+        global)
+            access_text="公网"
+            access_class="access-global"
+            ;;
+        unknown)
+            access_text="未知"
+            access_class="access-unknown"
+            ;;
+        *)
+            access_text="局域网"
+            access_class="access-local"
+            ;;
+    esac
     
     local status_badge status_class
     case "$status" in
@@ -1129,6 +1639,7 @@ generate_html() {
         
         .info-value.access-global { background: #f6ffed; color: #52c41a; }
         .info-value.access-local { background: #e6f7ff; color: #1890ff; }
+        .info-value.access-unknown { background: #fafafa; color: #8c8c8c; }
         .info-value.status-healthy { background: #f6ffed; color: #52c41a; }
         .info-value.status-unhealthy { background: #fff7e6; color: #faad14; }
         .info-value.status-stopped { background: #fff2f0; color: #ff4d4f; }
@@ -1236,7 +1747,7 @@ HTMLEOF
 main() {
     local start_time
     start_time=$(date +%s)
-    local VERSION="v3.8"
+    local VERSION="v3.9"
     
     echo -e "${BLUE}╔══════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║        服务仪表盘更新脚本 $VERSION         ║${NC}"
@@ -1394,6 +1905,34 @@ main() {
     fi
     
     log_info "共找到 ${#services[@]} 个服务"
+
+    # 访问权限以实际防火墙规则为准（忽略配置文件中的 access 字段）
+    log_info "检测防火墙规则（访问权限以实际规则为准）..."
+    fw_init
+    case "$FW_BACKEND" in
+        ufw|firewalld|iptables|nftables)
+            log_info "防火墙类型: $FW_BACKEND"
+            ;;
+        none)
+            log_info "防火墙类型: 未检测到防火墙（所有监听端口视为公网可访问）"
+            ;;
+        unknown)
+            log_warn "无法读取防火墙规则: ${FW_ERROR:-未知原因}"
+            log_warn "访问权限将显示为“未知”，请用 root 运行或配置免密 sudo"
+            ;;
+    esac
+
+    local i access_actual access_configured
+    for i in "${!services[@]}"; do
+        local s_port s_name s_access s_desc s_color s_btn s_scheme
+        IFS='|' read -r s_port s_name s_access s_desc s_color s_btn s_scheme <<< "${services[$i]}"
+        access_configured="$s_access"
+        access_actual=$(detect_access_type "$s_port")
+        if [ -n "$access_configured" ] && [ "$access_configured" != "$access_actual" ]; then
+            log_info "  $s_name (端口 $s_port): 配置为 $access_configured，实际为 $access_actual（以实际为准）"
+        fi
+        services[$i]="${s_port}|${s_name}|${access_actual}|${s_desc}|${s_color}|${s_btn}|${s_scheme}"
+    done
     
     # 加载反向代理配置并解析每个服务的访问协议（http/https）
     log_info "解析服务访问协议..."

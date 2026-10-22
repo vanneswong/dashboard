@@ -11,6 +11,7 @@
 ## 功能特性
 
 - 🔍 **自动服务发现** - 无需手动配置，自动扫描本机运行的服务
+- 🛡️ **真实访问权限** - 根据实际防火墙规则（UFW / firewalld / iptables / nftables）显示公网/局域网
 - 🔀 **反向代理支持** - 自动识别 Nginx / Caddy 反代服务及其 HTTP/HTTPS 协议
 - 🔒 **HTTPS 识别** - 自动检测服务访问协议，正确生成 https:// 访问地址
 - 💓 **健康检查** - 自动检测服务运行状态（端口监听 + HTTP检查）
@@ -160,7 +161,7 @@ desc = "公司官网，提供产品展示和联系方式"
 port = 443
 name = "服务仪表盘"
 desc = "服务监控面板"
-access = "local"           # 访问权限: global(公网) 或 local(局域网)
+access = "local"           # 已废弃：卡片访问权限始终以实际防火墙规则为准
 color = "auto"             # 卡片颜色: auto 或 CSS渐变/十六进制颜色
 btn_color = "auto"         # 按钮颜色: auto 或 十六进制颜色
 scheme = "https"           # 访问协议: auto(自动检测，默认) / http / https
@@ -176,7 +177,7 @@ scheme = "https"           # 访问协议: auto(自动检测，默认) / http / 
 |------|------|------|
 | 端口 | 服务监听的端口号 | 80, 8080, 3000 |
 | 服务名称 | 显示在仪表盘上的名称 | 公司官网 |
-| 访问权限 | `global`(公网) 或 `local`(局域网) | local |
+| 访问权限 | 已废弃，仅为兼容旧配置保留；实际以防火墙规则为准 | local |
 | 描述 | 服务的详细描述 | 公司官方网站 |
 | 卡片颜色 | CSS渐变、十六进制颜色值或`auto` | auto |
 | 按钮颜色 | 按钮的背景颜色或`auto` | auto |
@@ -189,7 +190,7 @@ scheme = "https"           # 访问协议: auto(自动检测，默认) / http / 
 | `port` | 服务监听的端口号 | 80, 8080, 3000 | 必填 |
 | `name` | 显示在仪表盘上的名称 | 公司官网 | 必填 |
 | `desc` | 服务的详细描述 | 公司官方网站 | 可选 |
-| `access` | 访问权限 | `global`(公网) 或 `local`(局域网) | 自动检测 |
+| `access` | 已废弃，仅为兼容旧配置保留；**卡片始终按实际防火墙规则显示** | `global` / `local` | 自动检测 |
 | `color` | 卡片颜色 | CSS渐变、十六进制颜色值或`auto` | `auto` |
 | `btn_color` | 按钮颜色 | 十六进制颜色值或`auto` | `auto` |
 | `scheme` | 访问协议 | `auto`(自动检测，默认) / `http` / `https` | `auto` |
@@ -200,6 +201,35 @@ scheme = "https"           # 访问协议: auto(自动检测，默认) / http / 
 - **健康服务**: 绿色渐变 `linear-gradient(90deg, #27ae60, #2ecc71)`
 - **停止服务**: 深蓝色 `linear-gradient(90deg, #34495e, #2c3e50)`
 - **异常服务**: 橙色渐变 `linear-gradient(90deg, #e67e22, #d35400)`
+
+### 访问权限检测（以实际防火墙为准）
+
+卡片上的“访问权限”来自**实际生效的防火墙规则**，配置文件的 `access` 字段不再参与判断。
+
+支持的防火墙后端：
+
+| 防火墙 | 说明 |
+|--------|------|
+| UFW | 解析 `ufw status verbose`，支持 `Anywhere`、内网网段和 `Nginx Full` 等应用配置 |
+| firewalld | 读取默认 zone 的 `ports` / `services` |
+| iptables | 解析 `iptables -S` 中的 INPUT / ufw-user-input 规则 |
+| nftables | 解析 `nft list ruleset` 中的 input / ufw-user-input 链 |
+
+判断规则：
+
+- 规则来源为 `Anywhere` / `0.0.0.0/0` / `::/0` → **公网**
+- 规则仅允许 `10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16`、回环或 IPv6 内网地址 → **局域网**
+- 无法读取防火墙规则（普通用户权限不足） → **未知**，不会错误地显示为公网
+
+> **定时任务权限**：`install.sh` 会自动为安装用户（`sudo` 调用时的用户）写入
+> `/etc/sudoers.d/dashboard-firewall`，只授权只读查询防火墙状态的命令。
+> 如果权限未配置，仪表盘会显示“未知”，可用 root 运行脚本或手动添加：
+>
+> ```bash
+> sudo visudo -f /etc/sudoers.d/dashboard-firewall
+> # 内容示例（将 USER 替换为实际运行定时任务的用户）
+> # USER ALL=(root) NOPASSWD: /usr/sbin/ufw status, /usr/sbin/ufw status verbose
+> ```
 
 ### 未运行服务过滤
 
@@ -295,6 +325,7 @@ tail -f /var/log/dashboard_update.log
 
 ## 版本历史
 
+- **v3.9** - 访问权限改为按实际防火墙规则显示（UFW / firewalld / iptables / nftables），配置文件的 `access` 字段不再生效
 - **v3.8** - 新增Caddy反向代理支持、HTTPS协议自动识别、过滤未运行服务
 - **v3.7** - 支持自动查找配置文件，优先TOML格式
 - **v3.6** - 支持TOML格式配置，更加易读和维护

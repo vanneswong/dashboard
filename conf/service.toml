@@ -13,7 +13,6 @@ desc = "流行的文件同步应用"
 port = 10000
 name = "服务仪表盘"
 desc = "服务监控面板"
-access = "local"           # 访问权限: global(公网) 或 local(局域网)
 
 # Photo Buddy
 [[services]]
@@ -42,5 +41,5 @@ desc = "发票助手代理版，管理多家企业发票"
 # 发票助理单企业版
 [[services]]
 port = 10005
-name = "发票助手单企业版"
-desc = "发票助手单企业版，只能管理一家企业的发票"
+name = "发票助手单企业版 - 中元华信"
+desc = "本应用管理的是中元华信的发票。"

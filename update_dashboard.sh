@@ -1,12 +1,12 @@
 #!/bin/bash
 # ============================================================================
-# 服务仪表盘更新脚本 v3.9
+# 服务仪表盘更新脚本 v4.0
 # 通用版本 - 适用于各类Linux服务器
 # ============================================================================
 # 功能：自动发现服务、健康检查、生成Web仪表盘
 # 作者：MiMo
-# 版本：v3.9
-# 更新：访问权限改为按实际防火墙规则（UFW/firewalld/iptables/nftables）显示
+# 版本：v4.0
+# 更新：访问权限细分为公网 / 局域网 / 本地回环（结合监听地址与防火墙规则）
 #      支持Caddy反向代理发现、HTTPS协议自动识别、过滤未运行服务
 # ============================================================================
 
@@ -435,12 +435,16 @@ get_service_desc() {
 }
 
 # ============================================================================
-# 防火墙访问权限检测（以实际防火墙规则为准）
+# 防火墙访问权限检测（监听地址 + 实际防火墙规则）
 # ============================================================================
-# 说明：卡片上的“访问权限”来自实际生效的防火墙规则，配置文件的 access
-#       字段不再作为判断依据（仅保留字段兼容）。
+# 说明：卡片上的“访问权限”由两层判断得出：
+#       1. 监听地址：仅绑定 127.0.0.1 / ::1 的端口为 loopback（本地回环，
+#          即使防火墙放行，外部也无法访问）；
+#       2. 防火墙规则：其余端口按实际规则区分 global（公网）/ local（局域网）。
+#       配置文件的 access 字段不再作为判断依据（仅保留字段兼容）。
 # 支持：UFW / firewalld / iptables / nftables
-# 返回值：global（公网可访问）/ local（仅内网可访问）/ unknown（无法读取规则）
+# 返回值：global（公网可访问）/ local（仅内网可访问）/
+#         loopback（仅本机回环可访问）/ unknown（无法读取规则）
 
 FW_INITIALIZED=0
 FW_BACKEND="none"            # ufw | firewalld | iptables | nftables | none | unknown
@@ -929,12 +933,68 @@ fw_init() {
     return 0
 }
 
-# 自动检测端口访问权限（以实际防火墙规则为准）
+# 检测端口监听地址范围
+# 返回值：loopback（仅 127.0.0.1 / ::1）/ all（绑定了非回环地址）
+BIND_SCOPE_CACHE=()
+get_bind_scope() {
+    local port="$1"
+    [ "$port" = "0" ] && { echo "loopback"; return 0; }
+
+    if [ -n "${BIND_SCOPE_CACHE[$port]:-}" ]; then
+        echo "${BIND_SCOPE_CACHE[$port]}"
+        return 0
+    fi
+
+    local -a addrs=()
+    local line
+    if command -v ss &>/dev/null; then
+        while IFS= read -r line; do
+            [ -n "$line" ] && addrs+=("$line")
+        done < <(ss -tlnH 2>/dev/null | awk -v p="$port" '{n=split($4,a,":"); if (a[n]==p) print $4}')
+    fi
+    if [ "${#addrs[@]}" -eq 0 ] && command -v netstat &>/dev/null; then
+        while IFS= read -r line; do
+            [ -n "$line" ] && addrs+=("$line")
+        done < <(netstat -tln 2>/dev/null | awk -v p="$port" '/LISTEN/ {n=split($4,a,":"); if (a[n]==p) print $4}')
+    fi
+
+    local scope="all" addr host
+    if [ "${#addrs[@]}" -gt 0 ]; then
+        for addr in "${addrs[@]}"; do
+            # 去掉 IPv6 方括号后取主机部分（端口已在末尾）
+            if [[ "$addr" == \[* ]]; then
+                host="${addr#[}"
+                host="${host%%]*}"
+            else
+                host="${addr%:*}"
+            fi
+            case "$host" in
+                127.*|::1|::ffff:127.*|localhost) ;;
+                *) scope="all"; break ;;
+            esac
+            scope="loopback"
+        done
+    fi
+
+    # 无法读取监听地址时不误判为回环，交给防火墙规则判断
+    [ "${#addrs[@]}" -eq 0 ] && scope="all"
+
+    BIND_SCOPE_CACHE["$port"]="$scope"
+    echo "$scope"
+}
+
+# 自动检测端口访问权限（监听地址 + 实际防火墙规则）
 detect_access_type() {
     local port="$1"
 
     # 非网络服务（如 cron 监控）没有对应端口
     [ "$port" = "0" ] && { echo "local"; return 0; }
+
+    # 仅监听回环地址：无论防火墙如何配置，公网/局域网都不可访问
+    if [ "$(get_bind_scope "$port")" = "loopback" ]; then
+        echo "loopback"
+        return 0
+    fi
 
     fw_init
 
@@ -1395,6 +1455,10 @@ generate_card() {
             access_text="未知"
             access_class="access-unknown"
             ;;
+        loopback)
+            access_text="本地回环"
+            access_class="access-loopback"
+            ;;
         *)
             access_text="局域网"
             access_class="access-local"
@@ -1639,6 +1703,7 @@ generate_html() {
         
         .info-value.access-global { background: #f6ffed; color: #52c41a; }
         .info-value.access-local { background: #e6f7ff; color: #1890ff; }
+        .info-value.access-loopback { background: #fff7e6; color: #fa8c16; }
         .info-value.access-unknown { background: #fafafa; color: #8c8c8c; }
         .info-value.status-healthy { background: #f6ffed; color: #52c41a; }
         .info-value.status-unhealthy { background: #fff7e6; color: #faad14; }
@@ -1747,7 +1812,7 @@ HTMLEOF
 main() {
     local start_time
     start_time=$(date +%s)
-    local VERSION="v3.9"
+    local VERSION="v4.0"
     
     echo -e "${BLUE}╔══════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║        服务仪表盘更新脚本 $VERSION         ║${NC}"
@@ -1923,6 +1988,7 @@ main() {
     esac
 
     local i access_actual access_configured
+    local count_global=0 count_local=0 count_loopback=0 count_unknown=0
     for i in "${!services[@]}"; do
         local s_port s_name s_access s_desc s_color s_btn s_scheme
         IFS='|' read -r s_port s_name s_access s_desc s_color s_btn s_scheme <<< "${services[$i]}"
@@ -1931,8 +1997,15 @@ main() {
         if [ -n "$access_configured" ] && [ "$access_configured" != "$access_actual" ]; then
             log_info "  $s_name (端口 $s_port): 配置为 $access_configured，实际为 $access_actual（以实际为准）"
         fi
+        case "$access_actual" in
+            global)   count_global=$((count_global + 1)) ;;
+            local)    count_local=$((count_local + 1)) ;;
+            loopback) count_loopback=$((count_loopback + 1)) ;;
+            *)        count_unknown=$((count_unknown + 1)) ;;
+        esac
         services[$i]="${s_port}|${s_name}|${access_actual}|${s_desc}|${s_color}|${s_btn}|${s_scheme}"
     done
+    log_info "访问权限统计: 公网 $count_global / 局域网 $count_local / 本地回环 $count_loopback / 未知 $count_unknown"
     
     # 加载反向代理配置并解析每个服务的访问协议（http/https）
     log_info "解析服务访问协议..."

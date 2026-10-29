@@ -1,13 +1,13 @@
 #!/bin/bash
 # ============================================================================
-# 服务仪表盘更新脚本 v4.0
+# 服务仪表盘更新脚本 v4.1
 # 通用版本 - 适用于各类Linux服务器
 # ============================================================================
 # 功能：自动发现服务、健康检查、生成Web仪表盘
 # 作者：MiMo
-# 版本：v4.0
+# 版本：v4.1
 # 更新：访问权限细分为公网 / 局域网 / 本地回环（结合监听地址与防火墙规则）
-#      支持Caddy反向代理发现、HTTPS协议自动识别、过滤未运行服务
+#      卡片按访问权限分组展示，支持Caddy反向代理发现、HTTPS协议自动识别、过滤未运行服务
 # ============================================================================
 
 set -euo pipefail
@@ -1535,9 +1535,33 @@ generate_card() {
 CARD
 }
 
+# 生成访问权限分组区块
+generate_group() {
+    local type="$1" cards="$2" count="$3"
+    local label
+    case "$type" in
+        global)   label="公网可访问" ;;
+        local)    label="局域网可访问" ;;
+        loopback) label="本地回环（仅本机）" ;;
+        *)        label="访问权限未知" ;;
+    esac
+
+    cat << GROUP
+        <section class="access-group access-group-$type">
+            <h2 class="access-group-title">
+                <span class="access-group-dot"></span>$label
+                <span class="access-group-count">$count 个服务</span>
+            </h2>
+            <div class="services-grid">
+$cards
+            </div>
+        </section>
+GROUP
+}
+
 # 生成完整HTML页面
 generate_html() {
-    local cards="$1"
+    local groups="$1"
     local total="$2" healthy="$3" unhealthy="$4" stopped="$5" health_rate="$6"
     local update_time="$7"
     local version="$8"
@@ -1626,6 +1650,39 @@ generate_html() {
             gap: 20px;
             padding: 15px 20px 0;
         }
+        
+        .access-group {
+            margin-top: 10px;
+        }
+        
+        .access-group-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 1.05rem;
+            font-weight: 600;
+            color: #333;
+            padding: 12px 20px 0;
+        }
+        
+        .access-group-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            flex: 0 0 auto;
+        }
+        
+        .access-group-count {
+            font-size: 0.8rem;
+            font-weight: 500;
+            color: #888;
+        }
+        
+        .access-group-global .access-group-dot { background: #52c41a; }
+        .access-group-local .access-group-dot { background: #1890ff; }
+        .access-group-loopback .access-group-dot { background: #fa8c16; }
+        .access-group-unknown .access-group-dot { background: #8c8c8c; }
         
         .card {
             background: white;
@@ -1760,6 +1817,11 @@ generate_html() {
                 grid-template-columns: 1fr;
                 padding: 0 10px;
             }
+            
+            .access-group-title {
+                padding: 12px 10px 0;
+                font-size: 0.95rem;
+            }
         }
     </style>
 </head>
@@ -1792,8 +1854,8 @@ generate_html() {
             </div>
         </div>
         
-        <div class="services-grid">
-            $cards
+        <div class="services-groups">
+            $groups
         </div>
     </div>
     
@@ -1812,7 +1874,7 @@ HTMLEOF
 main() {
     local start_time
     start_time=$(date +%s)
-    local VERSION="v4.0"
+    local VERSION="v4.1"
     
     echo -e "${BLUE}╔══════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║        服务仪表盘更新脚本 $VERSION         ║${NC}"
@@ -2073,15 +2135,28 @@ main() {
     local update_time
     update_time=$(date +"%Y年%m月%d日 %H:%M")
     
-    # 生成服务卡片
-    local cards=""
+    # 生成服务卡片（按访问权限分组）
+    local cards_global="" cards_local="" cards_loopback="" cards_unknown=""
     for service in "${services[@]}"; do
         local port name access desc color btn_color scheme
         IFS='|' read -r port name access desc color btn_color scheme <<< "$service"
         local status="${status_map[$port]:-unknown}"
-        cards+="$(generate_card "$port" "$name" "$access" "$desc" "$color" "$btn_color" "$status" "${scheme_map[$port]:-http}")"
+        local card
+        card=$(generate_card "$port" "$name" "$access" "$desc" "$color" "$btn_color" "$status" "${scheme_map[$port]:-http}")
+        case "$access" in
+            global)   cards_global+="$card" ;;
+            loopback) cards_loopback+="$card" ;;
+            unknown)  cards_unknown+="$card" ;;
+            *)        cards_local+="$card" ;;
+        esac
     done
-    
+
+    local cards=""
+    [ -n "$cards_global" ] && cards+="$(generate_group global "$cards_global" "$count_global")"
+    [ -n "$cards_local" ] && cards+="$(generate_group local "$cards_local" "$count_local")"
+    [ -n "$cards_loopback" ] && cards+="$(generate_group loopback "$cards_loopback" "$count_loopback")"
+    [ -n "$cards_unknown" ] && cards+="$(generate_group unknown "$cards_unknown" "$count_unknown")"
+
     # 生成完整HTML
     generate_html "$cards" "$total" "$healthy" "$unhealthy" "$stopped" "$health_rate" "$update_time" "$VERSION" > "$TEMP_FILE"
     
